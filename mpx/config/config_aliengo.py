@@ -20,7 +20,7 @@ mpc_frequency = 50  # Frequency of MPC updates in Hz
 timer_t =  jnp.array([0.5, 0.0, 0.0, 0.5])  # Timer values for each leg galop jnp.array([0.25, 0.5, 0.75, 0.0]) crawl jnp.array([0.25, 0.75, 0.0, 0.5])
 duty_factor = 0.65 #0.65  # Duty factor for the gait
 step_freq = 1.35 #1.4   # Step frequency in Hz
-step_height = 0.14 # Step height in meters
+step_height = 0.2 # Step height in meters
 initial_height = 0.1  # Initial height of the robot's base in meters
 robot_height = 0.36  # Height of the robot's base in meters
 
