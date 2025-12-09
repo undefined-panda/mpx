@@ -10,3 +10,4 @@ c_generated_code/
 *.pkl
 *.egg*info/
 custom_datasets/
+jax_playground.ipynb

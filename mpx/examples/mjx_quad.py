@@ -38,13 +38,13 @@ state_observables_names = tuple(QuadrupedEnv.ALL_OBS)  # return all available st
 # Initialize simulation environment
 sim_frequency = 200.0
 env = QuadrupedEnv(robot=robot_name,
-                       scene=scene_name,
-                       sim_dt = 1/sim_frequency,  # Simulation time step [s]
-                       ref_base_lin_vel=0.0, # Constant magnitude of reference base linear velocity [m/s]
-                       ground_friction_coeff=0.7,  # pass a float for a fixed value
-                       base_vel_command_type="human",  # "forward", "random", "forward+rotate", "human"
-                       state_obs_names=state_observables_names,  # Desired quantities in the 'state'
-                       )
+                   scene=scene_name,
+                   sim_dt = 1/sim_frequency,  # Simulation time step [s]
+                   ref_base_lin_vel=0.0, # Constant magnitude of reference base linear velocity [m/s]
+                   ground_friction_coeff=0.7,  # pass a float for a fixed value
+                   base_vel_command_type="human",  # "forward", "random", "forward+rotate", "human"
+                   state_obs_names=state_observables_names,  # Desired quantities in the 'state'
+                   )
 obs = env.reset(random=False)
 
 # Define the MPC wrapper
