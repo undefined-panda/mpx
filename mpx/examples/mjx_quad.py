@@ -16,7 +16,9 @@ import mpx.config.config_aliengo as config
 
 from timeit import default_timer as timer
 
-from pathlib import Path # ADDED BY ME
+# ADDED BY ME
+from pathlib import Path 
+from tqdm import tqdm
 
 # Set GPU device for JAX
 # gpu_device = jax.devices('gpu')[0]
@@ -35,8 +37,33 @@ state_observables_names = tuple(QuadrupedEnv.ALL_OBS)  # return all available st
  
 # Initialize simulation environment
 sim_frequency = 200.0
+env = QuadrupedEnv(robot=robot_name,
+                       scene=scene_name,
+                       sim_dt = 1/sim_frequency,  # Simulation time step [s]
+                       ref_base_lin_vel=0.0, # Constant magnitude of reference base linear velocity [m/s]
+                       ground_friction_coeff=0.7,  # pass a float for a fixed value
+                       base_vel_command_type="human",  # "forward", "random", "forward+rotate", "human"
+                       state_obs_names=state_observables_names,  # Desired quantities in the 'state'
+                       )
+obs = env.reset(random=False)
+
+# Define the MPC wrapper
+mpc = mpc_wrapper.MPCControllerWrapper(config)
+env.mjData.qpos = jnp.concatenate([config.p0, config.quat0,config.q0])
+env.render()
+counter = 0
+
+# Main simulation loop
+tau = jnp.zeros(config.n_joints)
+tau_old = jnp.zeros(config.n_joints)
 delay = 0 #int(0.007*sim_frequency)
 print('Delay: ',delay)
+
+q = config.q0.copy()
+dq = jnp.zeros(config.n_joints)
+mpc_time = 0
+mpc.robot_height = config.robot_height
+mpc.reset(env.mjData.qpos.copy(),env.mjData.qvel.copy())
 
 # BEGIN ADDED BY ME: dataset, log_values, save_dataset, for-loop
 dataset_path = Path.cwd() / "custom_datasets"
@@ -81,12 +108,11 @@ def save_dataset(dataset):
     for i in dataset:
         dataset[i] = np.stack(dataset[i], axis=0)
 
-    next_run = 0
-    current_run = 1
+    next_run = 1
     for file in Path(dataset_path).glob("*"):
-        current_run = int(file.stem.split("run", 1)[1])
-        if current_run > next_run:
-            next_run = current_run + 1
+        last_run = int(file.stem.split("run", 1)[1])
+        if last_run >= next_run:
+            next_run = last_run + 1
 
     np.savez(f"{dataset_path}/quad_dataset_run{next_run}.npz", **dataset)
     print("Data saved.")
@@ -106,61 +132,49 @@ custom_dataset = {"time":[],
                   "contact_pos_des":[]
                   }
 
-num_simulations = 1
+num_simulations = 5
+max_steps = 5000
+q_init = env.mjData.qpos.copy()
+dq_init = env.mjData.qvel.copy()
+
 custom_dataset = {k : [[] for _ in range(num_simulations)] for k in custom_dataset} # add one list per simulation: "base_pos" : [[], [], ...]
-log_and_save = False
+log_and_save = True
 
 for sim_num in range(num_simulations):
 
-    # ADDED BY ME: start new simulation when window is closed
-    env = QuadrupedEnv(robot=robot_name,
-                       scene=scene_name,
-                       sim_dt = 1/sim_frequency,  # Simulation time step [s]
-                       ref_base_lin_vel=0.0, # Constant magnitude of reference base linear velocity [m/s]
-                       ground_friction_coeff=0.7,  # pass a float for a fixed value
-                       base_vel_command_type="human",  # "forward", "random", "forward+rotate", "human"
-                       state_obs_names=state_observables_names,  # Desired quantities in the 'state'
-                       )
-    obs = env.reset(random=False)
+    # ADDED BY ME: reset environment after each simulation
+    if not env.viewer.is_running():
+        break
 
-    # Define the MPC wrapper
-    mpc = mpc_wrapper.MPCControllerWrapper(config)
-    env.mjData.qpos = jnp.concatenate([config.p0, config.quat0,config.q0])
-    env.render()
-    counter = 0
-
-    # Main simulation loop
+    env.reset(qpos=q_init, qvel=dq_init, random=False)
+    mpc.reset(q_init, dq_init)
     tau = jnp.zeros(config.n_joints)
-    tau_old = jnp.zeros(config.n_joints)
+    env.render()
 
-    q = config.q0.copy()
-    dq = jnp.zeros(config.n_joints)
-    mpc_time = 0
-    mpc.robot_height = config.robot_height
-    mpc.reset(env.mjData.qpos.copy(),env.mjData.qvel.copy())
+    for counter in tqdm(range(max_steps), desc=f"Running simulation {sim_num+1}"):
+        if not env.viewer.is_running():
+            break
 
-    while env.viewer.is_running():
-    
         qpos = env.mjData.qpos.copy()
         qvel = env.mjData.qvel.copy()
         qacc = env.mjData.qacc.copy() # ADDED BY ME: get base and joint accelaration
         if (counter % (sim_frequency / mpc_frequency) == 0 or counter == 0):
             
             ref_base_lin_vel = env._ref_base_lin_vel_H
-            ref_base_ang_vel =  np.array([0., 0., env._ref_base_ang_yaw_dot])
+            ref_base_ang_vel = np.array([0., 0., env._ref_base_ang_yaw_dot])
 
-            # ADDED BY ME: sample values to make the robot move on its own
+            # ADDED BY ME: make the robot move on its own
             # sample a velocity in the direction the robot is facing
             if counter != 0:
                 vx = np.random.uniform(0, 0.5) 
-                ref_base_lin_vel = np.array([vx, 0, 0])
+                ref_base_lin_vel = np.array([vx, 0., 0.])
             
                 # sample a angular rotation to turn the robot to left/right
-                if counter % ((sim_frequency / mpc_frequency) * 10) == 0:
-                    az = np.random.uniform(-1, 1) 
+                if (counter % 1000) == 0:
+                    az = np.random.uniform(-2, 2)
                     ref_base_ang_vel = np.array([0, 0, az])
 
-            print(f"base vel: {ref_base_lin_vel} \t base ang: {ref_base_ang_vel}")
+            #print(f"base vel: {ref_base_lin_vel} \t base ang: {ref_base_ang_vel}")
 
             input = np.array([ref_base_lin_vel[0],ref_base_lin_vel[1],ref_base_lin_vel[2],
                             ref_base_ang_vel[0],ref_base_ang_vel[1],ref_base_ang_vel[2],
@@ -209,6 +223,8 @@ for sim_num in range(num_simulations):
         counter += 1
         env.render()
 
-    print(f"\n----- Simulation {i+1} finished -----\n")
+    print(f"\n----- Simulation {sim_num+1} finished -----\n")
+
+env.close()
 
 if log_and_save: save_dataset(custom_dataset) # ADDED BY ME: save dataset of simulations
