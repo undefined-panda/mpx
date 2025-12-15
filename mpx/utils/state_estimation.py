@@ -17,7 +17,7 @@ class StateEstimator():
     - using JAX for numerical calculations
     """
 
-    def __init__(self, env):
+    def __init__(self):
         """
         Docstring for __init__
         
@@ -25,12 +25,13 @@ class StateEstimator():
         :param env: object of QuadrupedEnv
         """
 
-        self.env = env
-
         # state values
         # pose of robot's base in world coordinates
         self.pos = None
         self.orient = None
+
+        self.R = None
+        self.dt = None
 
         # robot base's twist in base coordinates
         self.lin_vel = None
@@ -56,26 +57,33 @@ class StateEstimator():
 
     def get_state(self):
         return self.state
+    
+    # source: https://cookierobotics.com/080/
+    def quaternion_to_rotation(self, orient):
+        w, x, y, z = orient
+        R = np.array([
+            [2*(w**2 + x**2) - 1, 2*(x*y - w*z)      , 2*(w*y + x*z)      ],
+            [2*(x*y + w*z)      , 2*(w**2 + y**2) - 1, 2*(y*z - w*x)      ],
+            [2*(x*z - w*y)      , 2*(y*z + w*x)      , 2*(w**2 + z**2) - 1]
+        ])
+        
+        return R
 
-    def estimate_contact_forces(self):
+    def estimate_contact_forces(self, contact_force):
         """
         Estimate the forces acting on the contact points (feet) using the dynamical model.
-        
-        :param self: Description
+        (Temporary using values from simulation directly.)
         """
-        _, contact_temp, contact_forces_temp = self.env.feet_contact_state(ground_reaction_forces=True)
-            
-        self.contact_forces = np.array([contact_forces_temp[self.robot_feet_geom_names[leg]] for leg in self.leg_names])
-        self.contact_pos = np.array([contact_temp[self.robot_feet_geom_names[leg]][0].pos for leg in self.leg_names])
+        
+        self.contact_forces = contact_force
 
-    def estimate_contact_states(self):
+    def estimate_contact_states(self, contact_state):
         """
         Estimate the contact state of the feet (touching the ground? floating?).
+        (Temporary using values from simulation directly.)
         """
-        contact_states_temp, contact_temp = self.env.feet_contact_state(ground_reaction_forces=False)
-            
-        self.contact_states = np.array([contact_states_temp[self.robot_feet_geom_names[leg]] for leg in self.leg_names])
-        self.contact_pos = np.array([contact_temp[self.robot_feet_geom_names[leg]][0].pos for leg in self.leg_names])
+        
+        self.contact_states = contact_state
 
     def forward_kinematics(self, feet_pos):
         """
@@ -86,16 +94,16 @@ class StateEstimator():
         - t = robot position (world frame)
         """
 
-        return self.orient.T @ (feet_pos - self.pos)
+        return self.R.T @ (feet_pos - self.pos)
 
-    def calc_leg_odometry(self):
+    def calc_leg_odometry(self, contact_state, contact_force):
         """
         Estimate robot movement based on informations from the legs (joint angle, joint velocity, contact) by using the forward kinematics to get the position of the foot based on the base.
         """
 
         # contact estimation
-        self.estimate_contact_states()
-        self.estimate_contact_forces()
+        self.estimate_contact_states(contact_state)
+        self.estimate_contact_forces(contact_force)
 
         # motion estimation
         foot_vels = []
@@ -103,22 +111,39 @@ class StateEstimator():
             if not self.contact_states[i]:
                 continue
 
+            # relative pose estimation
             foot_in_base = self.forward_kinematics(self.contact_pos[i])
+
+            # velocity estimation
             lin_jacobian = jax.jacobian(self.forward_kinematics)(self.pos)
             rel_vals = -np.cross(self.ang_vel, foot_in_base) - (lin_jacobian @ self.qdot)
-            foot_vels.append(rel_vals)
+            foot_vels.append(self.R @ rel_vals) # transformation body frame -> world frame
+        
+        new_vel = np.mean(np.array(foot_vels))
+        new_pos = self.pos + new_vel * self.dt # integrate velocity to get position
+        
+        return new_pos, new_vel
 
-    def update(self):
+    def update(self, dt, base_pos, base_orient, base_ang_val, joint_pos, joint_vel, contact_states, contact_force, contact_pos):
         """
-        Updating the estimated state
+        Updating the estimated state.
         """
 
-        qpos = self.env.mjData.qpos.copy()
-        self.pos = qpos[0:3]
-        self.orient = qpos[3:7]
-        self.q = qpos[7:]
+        self.dt = dt
 
-        qvel = self.env.mjData.qvel.copy()
-        self.lin_vel = qvel[0:3]
-        self.ang_vel = qvel[3:6]
-        self.qdot = qvel[6:]
+        self.pos = base_pos
+        self.orient = base_orient
+        self.R = self.quaternion_to_rotation(base_orient) # turn quaternion orientation to rotation matrix
+        self.ang_vel = base_ang_val
+
+        self.contact_states = contact_states
+        self.contact_pos = contact_pos
+        self.contact_forces = contact_force
+
+        self.q = joint_pos
+        self.qdot = joint_vel
+
+        self.contact_states = contact_states
+        self.contact_pos = contact_pos
+
+        self.calc_leg_odometry(contact_states, contact_force)

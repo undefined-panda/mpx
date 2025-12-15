@@ -26,7 +26,7 @@ from tqdm import tqdm
  
 # Define robot and scene parameters
 robot_name = "aliengo"   # "aliengo", "mini_cheetah", "go2", "hyqreal", ...
-scene_name = "random_boxes"
+scene_name = "flat" # "random_boxes"
 robot_feet_geom_names = dict(FR='FR',FL='FL', RR='RR' , RL='RL')
 robot_leg_joints = dict(FR=['FR_hip_joint', 'FR_thigh_joint', 'FR_calf_joint', ],
                         FL=['FL_hip_joint', 'FL_thigh_joint', 'FL_calf_joint', ],
@@ -70,7 +70,7 @@ dataset_path = Path.cwd() / "custom_datasets"
 dataset_path.mkdir(exist_ok=True)
 
 # add values to dataset
-def log_values(dataset, sim_num, t, qpos, qvel, qacc, tau_total, contact, contact_forces, q):
+def log_values(dataset, sim_num, t, qpos, qvel, qacc, tau_total, contact_states, contact_pos, contact_forces, q):
     """
     Docstring for log_values
     
@@ -88,8 +88,9 @@ def log_values(dataset, sim_num, t, qpos, qvel, qacc, tau_total, contact, contac
 
     # --- Base ---
     dataset["base_pos"][sim_num].append(qpos[0:3].copy())
-    dataset["base_orient"][sim_num].append(qpos[3:7].copy())
+    dataset["base_orient"][sim_num].append(qpos[3:7].copy()) # stored as quaternion
     dataset["base_vel"][sim_num].append(qvel[0:3].copy())
+    dataset["base_ang_vel"][sim_num].append(qvel[3:6].copy())
     dataset["base_acc"][sim_num].append(qacc[0:3].copy())
 
     # --- Joint ---
@@ -99,7 +100,8 @@ def log_values(dataset, sim_num, t, qpos, qvel, qacc, tau_total, contact, contac
     dataset["joint_torque"][sim_num].append(tau_total.copy())
     
     # --- Contact ---
-    dataset["contact_state"][sim_num].append(contact.copy())
+    dataset["contact_states"][sim_num].append(contact_states.copy())
+    dataset["contact_pos"][sim_num].append(contact_pos.copy())
     dataset["contact_forces"][sim_num].append(contact_forces.copy())
     dataset["contact_pos_des"][sim_num].append(q.copy())
 
@@ -119,15 +121,18 @@ def save_dataset(dataset):
 
 # store values in lists, convert them later to numpy arrays
 custom_dataset = {"time":[],
+                  "dt":None,
                   "base_pos":[],
                   "base_orient":[],
                   "base_vel":[],
+                  "base_ang_vel":[],
                   "base_acc":[],
                   "joint_pos":[],
                   "joint_vel":[],
                   "joint_acc":[],
                   "joint_torque":[],
-                  "contact_state":[],
+                  "contact_states":[],
+                  "contact_pos":[],
                   "contact_forces":[],
                   "contact_pos_des":[]
                   }
@@ -138,7 +143,9 @@ q_init = env.mjData.qpos.copy()
 dq_init = env.mjData.qvel.copy()
 
 custom_dataset = {k : [[] for _ in range(num_simulations)] for k in custom_dataset} # add one list per simulation: "base_pos" : [[], [], ...]
-log_and_save = True
+custom_dataset["dt"] = env.simulation_dt # constant for each simulation
+log_and_save = False
+old_dt = 0
 
 for sim_num in range(num_simulations):
 
@@ -151,6 +158,13 @@ for sim_num in range(num_simulations):
     tau = jnp.zeros(config.n_joints)
     env.render()
 
+    # ADDED BY ME: make the robot move on its own by sampling linear velocity and angular velocity for each simulation
+    vx = np.random.uniform(-1, 1) 
+    az = np.random.uniform(-0.5, 0.5)
+
+    ref_base_lin_vel = np.array([vx, 0., 0.])
+    ref_base_ang_vel = np.array([0, 0, az])
+
     for counter in tqdm(range(max_steps), desc=f"Running simulation {sim_num+1}"):
         if not env.viewer.is_running():
             break
@@ -159,31 +173,21 @@ for sim_num in range(num_simulations):
         qvel = env.mjData.qvel.copy()
         qacc = env.mjData.qacc.copy() # ADDED BY ME: get base and joint accelaration
         if (counter % (sim_frequency / mpc_frequency) == 0 or counter == 0):
-            
-            ref_base_lin_vel = env._ref_base_lin_vel_H
-            ref_base_ang_vel = np.array([0., 0., env._ref_base_ang_yaw_dot])
-
-            # ADDED BY ME: make the robot move on its own
-            # sample a velocity in the direction the robot is facing
-            if counter != 0:
-                vx = np.random.uniform(0, 0.5) 
-                ref_base_lin_vel = np.array([vx, 0., 0.])
-            
-                # sample a angular rotation to turn the robot to left/right
-                if (counter % 1000) == 0:
-                    az = np.random.uniform(-2, 2)
-                    ref_base_ang_vel = np.array([0, 0, az])
-
-            #print(f"base vel: {ref_base_lin_vel} \t base ang: {ref_base_ang_vel}")
 
             input = np.array([ref_base_lin_vel[0],ref_base_lin_vel[1],ref_base_lin_vel[2],
                             ref_base_ang_vel[0],ref_base_ang_vel[1],ref_base_ang_vel[2],
                             config.robot_height])
             
-            contact_temp, _, contact_forces_temp = env.feet_contact_state(ground_reaction_forces=True) # ADDED BY ME: set parameter to get contact forces
+            contact_temp, contact_pos_temp, contact_forces_temp = env.feet_contact_state(ground_reaction_forces=True) # ADDED BY ME: set parameter to get contact forces
             
-            contact = np.array([contact_temp[robot_feet_geom_names[leg]] for leg in ['FL','FR','RL','RR']])
+            contact_states = np.array([contact_temp[robot_feet_geom_names[leg]] for leg in ['FL','FR','RL','RR']])
             contact_forces = np.array([contact_forces_temp[robot_feet_geom_names[leg]] for leg in ['FL','FR','RL','RR']]) # ADDED BY ME: get values for contact forces
+
+            contact_pos = np.full((4, 3), np.nan, dtype=np.float32) # ADDED BY ME: store contact position in a matrix with each leg
+            for i, leg in enumerate(['FL','FR','RL','RR']):
+                if contact_states[i]:
+                    contacts = contact_pos_temp[robot_feet_geom_names[leg]]
+                    contact_pos[i] = contacts[0].pos
 
             if counter != 0:
                 for i in range(delay):
@@ -195,13 +199,13 @@ for sim_num in range(num_simulations):
                     tau_fb = 10*(q-qpos[7:7+config.n_joints]) -2*(qvel[6:6+config.n_joints])
                     state, reward, is_terminated, is_truncated, info = env.step(action=tau + tau_fb)
 
-                    t = env.mjData.time 
-                    log_values(custom_dataset, sim_num, t, qpos, qvel, qacc, tau+tau_fb, contact, contact_forces, q) # ADDED BY ME: add values to dataset
+                    t = env.simulation_time
+                    log_values(custom_dataset, sim_num, t, qpos, qvel, qacc, tau+tau_fb, contact_states, contact_pos, contact_forces, q) # ADDED BY ME: add values to dataset
 
                     counter += 1
 
             start = timer()
-            tau, q, dq = mpc.run(qpos,qvel,input,contact)   
+            tau, q, dq = mpc.run(qpos,qvel,input,contact_states)   
             stop = timer()
             #print("Time taken for MPC: ", stop-start)
 
@@ -216,8 +220,8 @@ for sim_num in range(num_simulations):
         tau_fb = 10*(q-qpos[7:7+config.n_joints])-2*(qvel[6:6+config.n_joints])
         state, reward, is_terminated, is_truncated, info = env.step(action= tau + tau_fb)
 
-        t = env.mjData.time
-        log_values(custom_dataset, sim_num, t, qpos, qvel, qacc, tau+tau_fb, contact, contact_forces, q) # ADDED BY ME: add values to dataset
+        t = env.simulation_time
+        log_values(custom_dataset, sim_num, t, qpos, qvel, qacc, tau+tau_fb, contact_states, contact_pos, contact_forces, q) # ADDED BY ME: add values to dataset
 
         # time.sleep(0.1)
         counter += 1
