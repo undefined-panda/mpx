@@ -34,7 +34,7 @@ def control_plot(dataset):
     # joint target position vs actual position
     pass
 
-for i, pos in enumerate(dataset["base_pos"]):
-    if i > 20:
-        break
-    print(f"Position at step {i+1}: x={pos[0]}, y={pos[1]}, z={pos[2]}")
+if __name__ == "__main__":
+    num_simulations = len(next(iter(dataset.values())))
+    
+    base_plot(dataset, num_simulations)
