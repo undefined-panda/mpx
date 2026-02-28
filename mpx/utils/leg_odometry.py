@@ -29,23 +29,9 @@ class LegOdom():
         self.dt = None
         self.state = State(pos=init_state[:3], vel=init_state[3:])
 
-        # robot base's twist in base coordinates
-        self.lin_vel = None
-        self.ang_vel = None
-
-        self.estimated_ang_vel = np.zeros(3)
-        self.R = None # rotation matrix, world -> base
-
-        # joint values
-        self.q = None
-        self.qdot = None
-        self.lin_jacobian = None
-
         # contact values
         self.robot_feet_geom_names = dict(FR='FR',FL='FL', RR='RR' , RL='RL')
         self.leg_names = ['FL','FR','RL','RR']
-        self.contact_states = None
-        self.contact_forces = None
 
     def get_state(self):
         return self.state
@@ -61,19 +47,52 @@ class LegOdom():
         
         return R
 
-    def estimate_contact_forces(self, contact_force):
+    def estimate_contact_forces(self, joint_torque, contact_state):
         """
         Estimate the forces acting on the contact points (feet) using the dynamical model.
-        (Temporary using values from simulation directly.)
         """
-        
-        self.contact_forces = contact_force
 
-    def estimate_contact_states(self, contact_state):
+        if contact_state is None or joint_torque is None:
+            raise ValueError(f"contact_state and joint_torque are needed to estimate contact_force. contact_state: {contact_state} \t joint_torque: {joint_torque}")
+        
+        J_feet_linear = self.env.feet_jacobians(frame="world")
+
+        force = np.zeros((3,))
+        contact_forces = []
+
+        # sum jacobians of all legs that are in contact
+        for i in range(4):
+            leg_name = self.env.legs_order[i]
+            c_i = contact_state[i]
+
+            J_lin = c_i * J_feet_linear[leg_name][:, 6:]
+
+            force += J_lin @ joint_torque
+            contact_forces.append(force)
+        
+        self.contact_forces = np.array(contact_forces)
+
+    def estimate_contact_states(self, contact_force, threshold, joint_torque):
         """
         Estimate the contact state of the feet (touching the ground? floating?).
-        (Temporary using values from simulation directly.)
         """
+
+        if contact_force is None or threshold is None:
+            raise ValueError(f"contact_force and threshold are needed to estimate the contact state. contact_force: {contact_force} \t threshold: {threshold}")
+        
+        contact_force = np.array(contact_force)
+        if contact_force.shape == (4,3): # x, y, z values for force
+            mask = (np.sqrt(contact_force[:, 0]**2 + contact_force[:, 1]**2) <= contact_force[:, 2])
+            contact_state = (contact_force != 0)[:, 0] & mask
+        elif contact_force.shape == (4,): # single value for force
+            if threshold is None:
+                raise ValueError(f"threshold is needed to estimate the force, when its shape is (4,)")
+            contact_state = contact_force > threshold
+            print("Estimating contact_force from estimated contact_state and joint torque")
+            self.estimate_contact_forces(contact_state, joint_torque)
+        else:
+            print(f"contact_force has invalid shape: {contact_force.shape}")
+            return
         
         self.contact_states = contact_state
 
@@ -93,17 +112,32 @@ class LegOdom():
         else:
             raise ValueError(f"Invalid frame: {frame} != 'world' or 'base'")
 
-    def calc_leg_odometry(self, dt, base_orient, base_ang_vel, qdot, contact_state, contact_force, contact_pos):
+    def calc_leg_odometry(self, dt, base_orient, base_ang_vel, qdot, joint_torque, joint_pos, contact_state, contact_force, contact_pos, contact_state_threshold):
         """
         Estimate robot movement based on informations from the legs (joint angle, joint velocity, contact) by using the forward kinematics to get the position of the foot based on the base.
         """
 
-        self.R = self.quat_to_rot(base_orient) # turn quaternion orientation to rotation matrix
-        #self.R = self.env.base_configuration[0:3, 0:3]
+        # set mjData pos
+        self.env.mjData.qpos[:] = np.concatenate([np.zeros(shape=(3,)), base_orient, joint_pos])
+        self.env.mjData.qvel[:] = np.concatenate([np.zeros(shape=(6,)), qdot])
+        
+        # calculate lineare jacobian
+        mujoco.mj_forward(self.env.mjModel, self.env.mjData)
+        self.lin_jacobian = self.env.feet_jacobians(frame="base") # use mj_jac from MuJoCo, defined in QuadrupedEnv
 
-        # contact estimation
-        self.estimate_contact_states(contact_state)
-        self.estimate_contact_forces(contact_force)
+        # turn quaternion orientation to rotation matrix
+        self.R = self.quat_to_rot(orient=base_orient) 
+
+        # contact estimation. if values for contact_force or contact_state are not provided, they will be estimated
+        if contact_force is None:
+            self.estimate_contact_forces(joint_torque=joint_torque, contact_state=contact_state)
+        else:
+            self.contact_forces = contact_force
+        
+        if contact_state is None:
+            self.estimate_contact_states(contact_force=contact_force, threshold=contact_state_threshold, joint_torque=joint_torque)
+        else:
+            self.contact_states = contact_state
 
         # motion estimation
         estimated_lin_vels = []
@@ -120,7 +154,7 @@ class LegOdom():
             j_v = self.lin_jacobian[self.leg_names[i]][:, 6:]
             
             # equation taken from SLAM handbook (Eq (12.21))
-            v_b = -np.cross(omega_b, p_b) - (j_v @ qdot) # everything is in base frame
+            v_b = np.cross(-omega_b, p_b) - (j_v @ qdot) # everything is in base frame
             v_w = self.R @ v_b # transform to world frame
             estimated_lin_vels.append(v_w)
         
@@ -133,26 +167,3 @@ class LegOdom():
         
         self.state.pos = new_pos
         self.state.vel = new_vel
-
-    # def update(self, dt, base_pos, base_orient, base_ang_vel, joint_pos, joint_vel, contact_states, contact_force, contact_pos):
-    #     """
-    #     Update the estimated state.
-    #     """
-
-    #     # self.dt = dt
-
-    #     # self.qpos = np.concatenate([base_pos, base_orient, joint_pos])
-    #     # self.env.mjData.qpos[:] = self.qpos
-    #     # mujoco.mj_forward(self.env.mjModel, self.env.mjData)
-    #     # self.lin_jacobians, self.ang_jacobians = self.env.feet_jacobians(frame="base", return_rot_jac=True) # use mj_jac from MuJoCo, defined in QuadrupedEnv
-
-    #     # self.R = self.quat_to_rot(base_orient) # turn quaternion orientation to rotation matrix
-    #     # #self.R = self.env.base_configuration[0:3, 0:3]
-    #     # self.ang_vel = base_ang_vel
-
-    #     # self.contact_pos = contact_pos
-
-    #     # self.q = joint_pos
-    #     # self.qdot = joint_vel
-
-    #     self.calc_leg_odometry(contact_states, contact_force)

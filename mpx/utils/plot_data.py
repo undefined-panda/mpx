@@ -30,19 +30,6 @@ def base_plot(time, base_pos):
     plt.grid(True)
     plt.show()
 
-def contact_plot(dataset):
-    # contact state per feet over time
-
-    # vertical force per feet
-    pass
-
-def joint_plot(dataset):
-    pass
-
-def control_plot(dataset):
-    # joint target position vs actual position
-    pass
-
 def compare_estimation_plot(time, gt_values, pred_values, pred_labels, ylabel, title, combined_plot=True):
     """
 
