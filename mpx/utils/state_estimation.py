@@ -3,28 +3,32 @@ import mujoco
 from utils.leg_odometry import LegOdom
 
 class EKF():
-    def __init__(self, init_pos, dt, Q_diag=1e-2, R_diag=1e-1):
+    def __init__(self, init_pos, dt, Q_diag=1e-2, R_diag=[1,1,1]):
         self.dt = dt
 
         # Kalman Filter matrices
         self.A = np.concatenate([np.concatenate([np.eye(3), self.dt * np.eye(3)], axis=1), np.concatenate([np.zeros((3,3)), np.eye(3)], axis=1)]) # state transition matrix
-        self.B = np.concatenate([np.zeros(3), np.full(3, self.dt)]) # control matrix
+        self.B = np.concatenate([np.zeros((3,3)), self.dt*np.eye(3)],axis=0) # control matrix
         self.H = np.concatenate([np.zeros((3,3)), np.eye(3)], axis=1) # observation matrix
 
         # Kalman Filter noise
         self.Q = np.diag(Q_diag*np.ones(6)) # process noise. lower value means trusting the model more
-        self.R = np.diag(R_diag*np.ones(3)) # measurement noise. lower value means trusting the measurement more
+        self.R = np.diag(np.array(R_diag)) # measurement noise. lower value means trusting the measurement more
 
         self.x = np.concatenate([init_pos, np.zeros(3)]) # state values (in world coordinates)
         self.P = self.Q # error covariance
         self.leg_odom = LegOdom(init_state=self.x)
     
     def step(self, base_orient, base_acc, base_ang_vel, joint_pos, joint_vel, joint_torque, contact_states, contact_forces, contact_pos, contact_state_threshold):
-        z, c_force, c_state = self.leg_odom_measurement(base_orient, base_ang_vel, joint_pos, joint_vel, joint_torque, contact_states, contact_forces, contact_pos, contact_state_threshold) # measurement, coming from leg odometry
+        z, leg_odom_pos, c_force, c_state = self.leg_odom_measurement(base_orient, base_ang_vel, joint_pos, joint_vel, joint_torque, contact_states, contact_forces, contact_pos, contact_state_threshold) # measurement, coming from leg odometry
         self.z = z
+        self.leg_odom_pos = leg_odom_pos
 
         if base_acc is None:
             base_acc = self.estimate_acc_from_contact_force(contact_states=c_state, contact_forces=c_force)
+        
+        self.c_force = c_force
+        self.base_acc = base_acc
 
         self.predict(base_acc)
 
@@ -36,9 +40,9 @@ class EKF():
 
         :param u: Control input vector (acceleration of the base)
         """
-        u = np.concatenate([np.zeros(3), acc])
+        u = acc
         try:
-            x_pred = self.A @ self.x + self.B * u
+            x_pred = self.A @ self.x + self.B @ u.T
             P_pred = self.A @ self.P @ self.A.T + self.Q
         except ValueError as e:
             print("Error in ekf.predict", e)
@@ -101,8 +105,9 @@ class EKF():
         
         # z = np.concatenate([self.leg_odom.state.pos, self.leg_odom.state.vel])
         z = self.leg_odom.state.vel
+        leg_odom_pos = self.leg_odom.state.pos
         
-        return z, self.leg_odom.contact_forces, self.leg_odom.contact_states
+        return z, leg_odom_pos, self.leg_odom.contact_forces, self.leg_odom.contact_states
 
     def estimate_acc_from_contact_force(self, contact_states, contact_forces):
         if contact_states is None or contact_forces is None:

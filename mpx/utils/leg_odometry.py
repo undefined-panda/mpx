@@ -49,13 +49,11 @@ class LegOdom():
 
     def estimate_contact_forces(self, joint_torque, contact_state):
         """
-        Estimate the forces acting on the contact points (feet) using the dynamical model.
+        Estimate the forces acting on the contact points (feet) using the dynamics model.
         """
 
         if contact_state is None or joint_torque is None:
             raise ValueError(f"contact_state and joint_torque are needed to estimate contact_force. contact_state: {contact_state} \t joint_torque: {joint_torque}")
-        
-        J_feet_linear = self.env.feet_jacobians(frame="world")
 
         force = np.zeros((3,))
         contact_forces = []
@@ -63,12 +61,10 @@ class LegOdom():
         # sum jacobians of all legs that are in contact
         for i in range(4):
             leg_name = self.env.legs_order[i]
-            c_i = contact_state[i]
 
-            J_lin = c_i * J_feet_linear[leg_name][:, 6:]
-
-            force += J_lin @ joint_torque
-            contact_forces.append(force)
+            J_lin = self.lin_jacobian_w[leg_name][:, 6:]
+            c_force = contact_state[i] * (J_lin @ joint_torque)
+            contact_forces.append(c_force)
         
         self.contact_forces = np.array(contact_forces)
 
@@ -111,6 +107,23 @@ class LegOdom():
             return self.R.T @ (feet_pos - self.state.pos)
         else:
             raise ValueError(f"Invalid frame: {frame} != 'world' or 'base'")
+        
+    def compute_foot_positions_B(self, joint_pos):
+        model = self.env.mjModel
+        data = self.env.mjData
+
+        data.qpos[:7] = np.array([0, 0 , 0, 1.0, 0, 0, 0])
+        data.qpos[7:] = joint_pos
+
+        mujoco.mj_forward(model, data)
+
+        foot_positions = []
+        for name in self.leg_names:
+            geom_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, name)
+            pos = data.geom_xpos[geom_id].copy()
+            foot_positions.append(pos)
+
+        return foot_positions
 
     def calc_leg_odometry(self, dt, base_orient, base_ang_vel, qdot, joint_torque, joint_pos, contact_state, contact_force, contact_pos, contact_state_threshold):
         """
@@ -123,7 +136,8 @@ class LegOdom():
         
         # calculate lineare jacobian
         mujoco.mj_forward(self.env.mjModel, self.env.mjData)
-        self.lin_jacobian = self.env.feet_jacobians(frame="base") # use mj_jac from MuJoCo, defined in QuadrupedEnv
+        self.lin_jacobian_b = self.env.feet_jacobians(frame="base") # use mj_jac from MuJoCo, defined in QuadrupedEnv
+        self.lin_jacobian_w = self.env.feet_jacobians(frame="world")
 
         # turn quaternion orientation to rotation matrix
         self.R = self.quat_to_rot(orient=base_orient) 
@@ -141,6 +155,8 @@ class LegOdom():
 
         # motion estimation
         estimated_lin_vels = []
+
+        p_b = self.compute_foot_positions_B(joint_pos=joint_pos)
         for i in range(len(self.leg_names)):
             if not self.contact_states[i]:
                 continue
@@ -148,13 +164,13 @@ class LegOdom():
             omega_b = self.R.T @ base_ang_vel # transform into base frame
 
             # relative pose estimation
-            p_b = self.calc_rel_foot_pos(contact_pos[i], frame="base")
+            # p_b = self.calc_rel_foot_pos(contact_pos[i], frame="base")
 
             # velocity estimation
-            j_v = self.lin_jacobian[self.leg_names[i]][:, 6:]
+            j_v = self.lin_jacobian_b[self.leg_names[i]][:, 6:]
             
             # equation taken from SLAM handbook (Eq (12.21))
-            v_b = np.cross(-omega_b, p_b) - (j_v @ qdot) # everything is in base frame
+            v_b = np.cross(-omega_b, p_b[i]) - (j_v @ qdot) # everything is in base frame
             v_w = self.R @ v_b # transform to world frame
             estimated_lin_vels.append(v_w)
         

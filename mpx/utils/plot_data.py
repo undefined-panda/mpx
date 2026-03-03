@@ -5,6 +5,7 @@ This file creates plots from custom datasets. The plots are for 'mjx_quad.py'.
 import numpy as np
 from pathlib import Path
 import matplotlib.pyplot as plt
+import os
 
 def base_plot(time, base_pos):
     # trajectory
@@ -30,7 +31,7 @@ def base_plot(time, base_pos):
     plt.grid(True)
     plt.show()
 
-def compare_estimation_plot(time, gt_values, pred_values, pred_labels, ylabel, title, combined_plot=True):
+def compare_estimation_plot(time, gt_values, gt_label, pred_values, pred_labels, ylabel, title, output_folder=None, file_name=None, colors=None, combined_plot=True):
     """
 
     Args:
@@ -54,30 +55,29 @@ def compare_estimation_plot(time, gt_values, pred_values, pred_labels, ylabel, t
         print(f"gt_values and pred_values have different number of dimensions: {gt_shape} and {pred_shapes}")
         return
     
+    if colors is None: colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+
     num_plots = 1 if combined_plot else len(pred_values)
     num_dim = gt_shape[1]
     fig_size = (16,8) if combined_plot else (20,15)
     _, axes = plt.subplots(num_plots, 1, figsize=fig_size, sharex=combined_plot)
 
-    dim_labels = ["x", "y", "z"]
-    line_styles = ["-", ":"]
-
     for j in range(num_plots):
         for i in range(num_dim):
             if combined_plot:
-                axes.plot(time, gt_values[:, i], "--", label=f"Ground Truth {dim_labels[i]}")
+                axes.plot(time, gt_values[:, i], "--", label=gt_label, color=colors[j])
             else:
-                axes[j].plot(time, gt_values[:, i], "--", label=f"Ground Truth {dim_labels[i]}")
+                axes[j].plot(time, gt_values[:, i], "--", label=gt_label, color=colors[j])
 
     if combined_plot:
         for k, prediction in enumerate(pred_values):
             for i in range(num_dim):
-                axes.plot(time, prediction[:, i], linestyle=line_styles[k], label=f"{pred_labels[k]} {dim_labels[i]}")
+                axes.plot(time, prediction[:, i], linestyle="-", label=f"{pred_labels[k]}", alpha=0.5, color=colors[k+1])
     else:
         for j in range(num_plots):
             prediction = pred_values[j]
             for i in range(num_dim):
-                axes[j].plot(time, prediction[:, i], linestyle=line_styles[0], label=f"{pred_labels[j]} {dim_labels[i]}")
+                axes[j].plot(time, prediction[:, i], linestyle="-", label=f"{pred_labels[j]}", alpha=0.5, color=colors[j+1])
 
     if combined_plot:
         axes.set_xlabel("Time [s]")
@@ -92,6 +92,11 @@ def compare_estimation_plot(time, gt_values, pred_values, pred_labels, ylabel, t
             axes[j].set_title(title)
             axes[j].grid(True)
             axes[j].legend()
+    
+    if output_folder is not None: 
+        os.makedirs(output_folder, exist_ok=True)
+        plt.savefig(output_folder+"/"+file_name+".png", bbox_inches='tight')
+        plt.savefig(output_folder+"/"+file_name+".pdf", bbox_inches='tight')
 
     plt.tight_layout()
     plt.show()

@@ -164,6 +164,7 @@ def run_state_estimation(dt,
 
     # results of leg odometry
     leg_odom_sim = []
+    leg_odom_pos = []
 
     # results of EKF update step
     pos_update_sim = []
@@ -171,6 +172,8 @@ def run_state_estimation(dt,
     P_update_sim = []
 
     kalman_gain = []
+    base_acc_est = []
+    c_force_est = []
     z_tilde = []
 
     for i in tqdm(range(len(base_orient)), desc="Estimating state"):
@@ -190,6 +193,9 @@ def run_state_estimation(dt,
         P_predict_sim.append(ekf.P_pred)
 
         leg_odom_sim.append(ekf.z)
+        leg_odom_pos.append(ekf.leg_odom_pos)
+        base_acc_est.append(ekf.base_acc)
+        c_force_est.append(ekf.c_force)
 
         pos_update_sim.append(ekf.x[:3])
         vel_update_sim.append(ekf.x[3:])
@@ -201,11 +207,14 @@ def run_state_estimation(dt,
               "vel_predict": np.array(vel_precict_sim),
               "P_predict": np.array(P_predict_sim),
               "leg_odom": np.array(leg_odom_sim),
+              "leg_odom_pos": np.array(leg_odom_pos),
               "pos_update": np.array(pos_update_sim),
               "vel_update": np.array(vel_update_sim),
               "P_update": np.array(P_update_sim),
               "kalman_gain": np.array(kalman_gain),
-              "z_tilde": np.array(z_tilde)
+              "z_tilde": np.array(z_tilde),
+              "base_acc_est": np.array(base_acc_est),
+              "c_force_est": np.array(c_force_est)
               }
     
     return result
