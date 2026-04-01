@@ -145,7 +145,7 @@ dq_init = env.mjData.qvel.copy()
 
 custom_dataset = {k : [[] for _ in range(num_simulations)] for k in custom_dataset} # add one list per simulation: "base_pos" : [[], [], ...]
 dt = env.simulation_dt # constant for each simulation
-log_and_save = True
+log_and_save = False
 old_dt = 0
 
 for sim_num in range(num_simulations):

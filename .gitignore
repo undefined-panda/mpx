@@ -12,3 +12,7 @@ c_generated_code/
 *_test.ipynb
 plots/
 *.bag
+results/
+mjx_quad_original.py
+quad_slam_old.ipynb
+custom_datasets/

@@ -2,13 +2,7 @@ import numpy as np
 from pathlib import Path
 import utils.state_estimation
 from utils.plot_data import *
-from gym_quadruped.quadruped_env import QuadrupedEnv
-import mujoco
 from tqdm import tqdm
-from rosbags.highlevel import AnyReader
-from rosbags.typesys import get_typestore, Stores
-from pathlib import Path
-import numpy as np
 
 def load_custom_dataset(dataset_path, sim_num):
     dataset = np.load(dataset_path)
@@ -128,7 +122,10 @@ def run_state_estimation(dt,
                          joint_torque=None,
                          contact_forces=None,
                          contact_states=None,
-                         contact_state_threshold=None):
+                         contact_state_threshold=None,
+                         result_dir=None,
+                         file_name=None,
+                         legs_order=None):
     """_summary_
 
     Args:
@@ -156,6 +153,7 @@ def run_state_estimation(dt,
     if contact_state_threshold is None: contact_state_threshold = [None] * len(base_orient)
 
     ekf = utils.state_estimation.EKF(init_pos=init_pos, dt=dt, Q_diag=Q, R_diag=R)
+    if legs_order: ekf.leg_odom.env.legs_order = legs_order
 
     # results of EKF prediction step
     pos_predict_sim = []
@@ -216,5 +214,11 @@ def run_state_estimation(dt,
               "base_acc_est": np.array(base_acc_est),
               "c_force_est": np.array(c_force_est)
               }
+    
+    if result_dir and file_name:
+        save_path = Path.cwd().parent / result_dir
+        save_path.mkdir(parents=True, exist_ok=True)
+        np.savez(f"{save_path}/{file_name}.npz", **result)
+        print(f"Result saved in {save_path}/{file_name}")
     
     return result

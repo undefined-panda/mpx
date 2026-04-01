@@ -31,7 +31,21 @@ def base_plot(time, base_pos):
     plt.grid(True)
     plt.show()
 
-def compare_estimation_plot(time, gt_values, gt_label, pred_values, pred_labels, ylabel, title, output_folder=None, file_name=None, colors=None, combined_plot=True):
+def compare_estimation_plot(time, 
+                            gt_values, 
+                            gt_label, 
+                            pred_values, 
+                            pred_labels, 
+                            ylabel, 
+                            title, 
+                            output_folder=None, 
+                            file_name=None, 
+                            colors=None, 
+                            combined_plot=True, 
+                            time_window=None, 
+                            font_size=None,
+                            show_legend=True,
+                            seperate_legend=False):
     """
 
     Args:
@@ -43,6 +57,8 @@ def compare_estimation_plot(time, gt_values, gt_label, pred_values, pred_labels,
         title (str): Title
         combined_plot (bool, optional): If True, plot values of each prediction in one plot, else seperated. Defaults to True.
     """
+
+    if font_size: plt.rcParams.update({'font.size': font_size})
 
     if len(pred_values) != len(pred_labels):
         print(f"prediction arrays and labels have different len: {len(pred_values)} and {len(pred_labels)}")
@@ -59,6 +75,13 @@ def compare_estimation_plot(time, gt_values, gt_label, pred_values, pred_labels,
 
     num_plots = 1 if combined_plot else len(pred_values)
     num_dim = gt_shape[1]
+    if time_window is not None:
+        if not isinstance(time_window, list): 
+            print("time_window must be type list")
+            return
+        if len(time_window) != 2:
+            print("time_window must have 2 values")
+            return
     fig_size = (16,8) if combined_plot else (20,15)
     _, axes = plt.subplots(num_plots, 1, figsize=fig_size, sharex=combined_plot)
 
@@ -84,19 +107,29 @@ def compare_estimation_plot(time, gt_values, gt_label, pred_values, pred_labels,
         axes.set_ylabel(ylabel)
         axes.set_title(title)
         axes.grid(True)
-        axes.legend()
+        if time_window is not None: axes.set_xlim(time_window)
+        if show_legend: axes.legend()
     else:
         for j in range(num_plots):
             axes[j].set_xlabel("Time [s]")
             axes[j].set_ylabel(ylabel)
             axes[j].set_title(title)
             axes[j].grid(True)
-            axes[j].legend()
+            if time_window is not None: axes[j].set_xlim(time_window)
+            if show_legend: axes[j].legend()
     
     if output_folder is not None: 
         os.makedirs(output_folder, exist_ok=True)
         plt.savefig(output_folder+"/"+file_name+".png", bbox_inches='tight')
         plt.savefig(output_folder+"/"+file_name+".pdf", bbox_inches='tight')
 
+    if seperate_legend: 
+        legend = axes.legend()
+        fig_leg = plt.figure(figsize=(2,2))
+        fig_leg.legend(*axes.get_legend_handles_labels(), loc="center")
+        fig_leg.savefig("legend.png", bbox_inches="tight")
+        plt.close(fig_leg)
+
+        if not show_legend: legend.remove()
     plt.tight_layout()
     plt.show()

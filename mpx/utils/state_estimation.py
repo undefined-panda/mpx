@@ -1,8 +1,12 @@
 import numpy as np
-import mujoco
 from utils.leg_odometry import LegOdom
+from utils.dynamics_model import estimate_acc_from_contact_force
 
 class EKF():
+    """
+    This class imeplemnts a Kalman Filter using Leg Odometry as measurement.
+    """
+
     def __init__(self, init_pos, dt, Q_diag=1e-2, R_diag=[1,1,1]):
         self.dt = dt
 
@@ -15,32 +19,66 @@ class EKF():
         self.Q = np.diag(Q_diag*np.ones(6)) # process noise. lower value means trusting the model more
         self.R = np.diag(np.array(R_diag)) # measurement noise. lower value means trusting the measurement more
 
+        # State
         self.x = np.concatenate([init_pos, np.zeros(3)]) # state values (in world coordinates)
         self.P = self.Q # error covariance
+
         self.leg_odom = LegOdom(init_state=self.x)
     
-    def step(self, base_orient, base_acc, base_ang_vel, joint_pos, joint_vel, joint_torque, contact_states, contact_forces, contact_pos, contact_state_threshold):
-        z, leg_odom_pos, c_force, c_state = self.leg_odom_measurement(base_orient, base_ang_vel, joint_pos, joint_vel, joint_torque, contact_states, contact_forces, contact_pos, contact_state_threshold) # measurement, coming from leg odometry
-        self.z = z
-        self.leg_odom_pos = leg_odom_pos
+    def step(self, base_orient, base_acc, base_ang_vel, joint_pos, joint_vel, joint_torque, contact_states, contact_forces, contact_pos, contact_state_threshold) -> None:
+        """Kalman Filter algorithmic loop. Alternating between prediction step, gathering new measurement and update step.
 
-        if base_acc is None:
-            base_acc = self.estimate_acc_from_contact_force(contact_states=c_state, contact_forces=c_force)
+        Args:
+            base_orient (np.ndarray): base orientation as quaternion in [w, x, y, z] format
+            base_acc (np.ndarray | None): base acceleration
+            base_ang_vel (np.ndarray): base angular velocity
+            joint_pos (np.ndarray): joint position
+            joint_vel (np.ndarray): joint velocity
+            joint_torque (np.ndarray): joint torque
+            contact_states (np.ndarray): contact state of legs with ground
+            contact_forces (np.ndarray): force acting on the contact point during stance phase
+            contact_pos (np.ndarray): leg position during contact
+            contact_state_threshold (int): contact force threshold indicating contact with the ground 
+        """
+
+        # measurement, coming from leg odometry
+        self.leg_odom.compute_leg_odometry(dt=self.dt,
+                                           base_orient=base_orient,
+                                           base_ang_vel=base_ang_vel,
+                                           qdot=joint_vel,
+                                           joint_torque=joint_torque,
+                                           joint_pos=joint_pos,
+                                           contact_state=contact_states,
+                                           contact_force=contact_forces,
+                                           contact_pos=contact_pos,
+                                           contact_state_threshold=contact_state_threshold)
         
-        self.c_force = c_force
+        self.z = self.leg_odom.state.vel
+        self.leg_odom_pos = self.leg_odom.state.pos
+        self.c_force = self.leg_odom.contact_forces
+        self.c_state = self.leg_odom.contact_states
+
+        # estimate base acceleration with dynamics model
+        if base_acc is None:
+            base_acc = estimate_acc_from_contact_force(m=float(np.sum(self.leg_odom.env.mjModel.body_mass)),
+                                                       contact_states=self.c_state,
+                                                       contact_forces=self.c_force)
+        
         self.base_acc = base_acc
 
-        self.predict(base_acc)
+        # prediction step with base acceleration
+        self.predict(u=base_acc)
 
-        self.update(z) # update step with leg odometry result as input
+        # update step with leg odometry result as input
+        self.update(self.z)
 
-    def predict(self, acc):
+    def predict(self, u):
+        """Prediction step of Kalman Filter. Estimate robot state based on previous estimation.
+
+        Args:
+            u (np.ndarray): control input vector (here: base acceleration)
         """
-        Estimate robot movement based on information from the legs.
 
-        :param u: Control input vector (acceleration of the base)
-        """
-        u = acc
         try:
             x_pred = self.A @ self.x + self.B @ u.T
             P_pred = self.A @ self.P @ self.A.T + self.Q
@@ -51,10 +89,10 @@ class EKF():
         self.P_pred = P_pred
     
     def update(self, z):
-        """
-        Update estimation with consideration of measurement. Measurement comes from leg odometry.
-        
-        :param z: measurement
+        """Update step of Kalman Filter. Update estimation with consideration of measurement, comes from leg odometry.
+
+        Args:
+            z (np.ndarray): measurement (result of leg odometry)
         """
 
         z_tilde = z - self.H @ self.x_pred # measurement residual
@@ -68,64 +106,3 @@ class EKF():
 
         self.x = x_update
         self.P = P_update
-
-    def leg_odom_measurement(self, base_orient, base_ang_vel, joint_pos, joint_vel, joint_torque, contact_states, contact_forces, contact_pos, contact_state_threshold):
-        """
-        Create measurement from leg odometry, based on equations of SLAM Handbook Ch. 12
-        
-        :param base_pos: Description
-        :param base_orient: Description
-        :param base_ang_vel: Description
-        :param joint_pos: Description
-        :param joint_vel: Description
-        :param contact_states: Description
-        :param contact_forces: Description
-        :param contact_pos: Description
-        """
-
-        # set mjData pos
-        # qpos = np.concatenate([np.zeros(shape=(3,)), base_orient, joint_pos])
-        # self.leg_odom.env.mjData.qpos[:] = qpos
-        
-        # # calculate lineare jacobian
-        # mujoco.mj_forward(self.leg_odom.env.mjModel, self.leg_odom.env.mjData)
-        # self.leg_odom.lin_jacobian = self.leg_odom.env.feet_jacobians(frame="base") # use mj_jac from MuJoCo, defined in QuadrupedEnv
-
-        # estimate state with leg odometry
-        self.leg_odom.calc_leg_odometry(dt=self.dt,
-                                        base_orient=base_orient,
-                                        base_ang_vel=base_ang_vel,
-                                        qdot=joint_vel,
-                                        joint_torque=joint_torque,
-                                        joint_pos=joint_pos,
-                                        contact_state=contact_states,
-                                        contact_force=contact_forces,
-                                        contact_pos=contact_pos,
-                                        contact_state_threshold=contact_state_threshold)
-        
-        # z = np.concatenate([self.leg_odom.state.pos, self.leg_odom.state.vel])
-        z = self.leg_odom.state.vel
-        leg_odom_pos = self.leg_odom.state.pos
-        
-        return z, leg_odom_pos, self.leg_odom.contact_forces, self.leg_odom.contact_states
-
-    def estimate_acc_from_contact_force(self, contact_states, contact_forces):
-        if contact_states is None or contact_forces is None:
-            raise ValueError(f"contact_states and contact_forces are needed to estimate the base acc. We have contact_states: {contact_states} \t contact_forces: {contact_forces}")
-
-        m = float(np.sum(self.leg_odom.env.mjModel.body_mass))
-        g = 9.81
-        Fg = m * np.array([0, 0, g])
-
-        force = np.zeros((3,))
-
-        # sum jacobians of all legs that are in contact
-        for i in range(4):
-            c_i = contact_states[i]
-            cf_i = contact_forces[i]
-
-            force += c_i * cf_i
-
-        acc = (force - Fg) / m
-
-        return acc
