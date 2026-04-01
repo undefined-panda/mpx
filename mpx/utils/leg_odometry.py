@@ -28,9 +28,8 @@ class LegOdom():
     A foot is considered in contact when its stationary over time, i.e. it does not slip. The Ground Reaction Force is used for that.
     """
 
-    def __init__(self, init_state, robot_name="aliengo", legs_order=['FL','FR','RL','RR']):
-        self.env = QuadrupedEnv(robot=robot_name)
-        self.env.legs_order = legs_order
+    def __init__(self, init_state):
+        self.env = QuadrupedEnv(robot="go1") # legs_order = ('FL', 'FR', 'RL', 'RR')
 
         self.dt = None
         self.state = State(pos=init_state[:3], vel=init_state[3:])
@@ -123,10 +122,10 @@ class LegOdom():
                 print("Estimating contact_force from estimated contact_state and joint torque")
                 self.info_log = True
 
-            estimate_contact_forces(joint_torque=joint_torque, 
-                                    contact_state=self.contact_states, 
-                                    legs_order=self.env.legs_order, 
-                                    lin_jacobian_w=self.lin_jacobian_w)
+            self.contact_forces = estimate_contact_forces(joint_torque=joint_torque, 
+                                                          contact_state=contact_state, 
+                                                          legs_order=self.env.legs_order, 
+                                                          lin_jacobian_w=self.lin_jacobian_w)
 
         else:
             raise ValueError(f"contact_force has invalid shape: {contact_force.shape}")
@@ -152,7 +151,7 @@ class LegOdom():
         mujoco.mj_forward(model, data)
 
         foot_positions = []
-        for name in self.legs_order:
+        for name in self.env.legs_order:
             geom_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, name)
             pos = data.geom_xpos[geom_id].copy()
             foot_positions.append(pos)
@@ -186,19 +185,18 @@ class LegOdom():
         self.lin_jacobian_b = self.env.feet_jacobians(frame="base") # use mj_jac from MuJoCo, defined in QuadrupedEnv
         self.lin_jacobian_w = self.env.feet_jacobians(frame="world")
 
-        # contact estimation. if values for contact_force or contact_state are not provided, they will be estimated
-        if contact_force is None:
-            estimate_contact_forces(joint_torque=joint_torque, 
-                                    contact_state=self.contact_states, 
-                                    legs_order=self.env.legs_order, 
-                                    lin_jacobian_w=self.lin_jacobian_w)
-        else:
-            self.contact_forces = contact_force
-        
+        # contact estimation. if values for contact_force or contact_state are not provided, they will be estimated        
         if contact_state is None:
             self.estimate_contact_states(contact_force=contact_force, threshold=contact_state_threshold, joint_torque=joint_torque)
         else:
             self.contact_states = contact_state
+            if contact_force is None:
+                self.contact_forces = estimate_contact_forces(joint_torque=joint_torque, 
+                                                              contact_state=self.contact_states, 
+                                                              legs_order=self.env.legs_order, 
+                                                              lin_jacobian_w=self.lin_jacobian_w)
+            else:
+                self.contact_forces = contact_force
 
         # motion estimation
         estimated_lin_vels = []
@@ -206,7 +204,7 @@ class LegOdom():
         # foot position in base frame
         p_b = self.compute_foot_positions_B(joint_pos=joint_pos)
 
-        for i in range(len(self.legs_order)):
+        for i in range(len(self.env.legs_order)):
             if not self.contact_states[i]:
                 continue
 
@@ -214,7 +212,7 @@ class LegOdom():
             omega_b = self.R.T @ base_ang_vel 
 
             # velocity estimation
-            j_v = self.lin_jacobian_b[self.legs_order[i]][:, 6:]
+            j_v = self.lin_jacobian_b[self.env.legs_order[i]][:, 6:]
             
             # equation taken from SLAM handbook (Eq (12.21))
             v_b = np.cross(-omega_b, p_b[i]) - (j_v @ qdot) # everything is in base frame

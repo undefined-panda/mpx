@@ -39,7 +39,8 @@ def compare_estimation_plot(time,
                             ylabel, 
                             title, 
                             output_folder=None, 
-                            file_name=None, 
+                            file_name=None,
+                            file_types=["png", "pdf"],
                             colors=None, 
                             combined_plot=True, 
                             time_window=None, 
@@ -120,8 +121,8 @@ def compare_estimation_plot(time,
     
     if output_folder is not None: 
         os.makedirs(output_folder, exist_ok=True)
-        plt.savefig(output_folder+"/"+file_name+".png", bbox_inches='tight')
-        plt.savefig(output_folder+"/"+file_name+".pdf", bbox_inches='tight')
+        for file_type in file_types:
+            plt.savefig(f"{output_folder}/{file_name}.{file_type}", bbox_inches='tight')
 
     if seperate_legend: 
         legend = axes.legend()

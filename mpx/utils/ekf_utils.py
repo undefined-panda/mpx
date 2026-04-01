@@ -124,8 +124,7 @@ def run_state_estimation(dt,
                          contact_states=None,
                          contact_state_threshold=None,
                          result_dir=None,
-                         file_name=None,
-                         legs_order=None):
+                         file_name=None):
     """_summary_
 
     Args:
@@ -153,7 +152,6 @@ def run_state_estimation(dt,
     if contact_state_threshold is None: contact_state_threshold = [None] * len(base_orient)
 
     ekf = utils.state_estimation.EKF(init_pos=init_pos, dt=dt, Q_diag=Q, R_diag=R)
-    if legs_order: ekf.leg_odom.env.legs_order = legs_order
 
     # results of EKF prediction step
     pos_predict_sim = []

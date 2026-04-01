@@ -50,7 +50,6 @@ class EKF():
                                            joint_pos=joint_pos,
                                            contact_state=contact_states,
                                            contact_force=contact_forces,
-                                           contact_pos=contact_pos,
                                            contact_state_threshold=contact_state_threshold)
         
         self.z = self.leg_odom.state.vel
@@ -60,7 +59,8 @@ class EKF():
 
         # estimate base acceleration with dynamics model
         if base_acc is None:
-            base_acc = estimate_acc_from_contact_force(m=float(np.sum(self.leg_odom.env.mjModel.body_mass)),
+            body_mass = float(np.sum(self.leg_odom.env.mjModel.body_mass))
+            base_acc = estimate_acc_from_contact_force(m=body_mass,
                                                        contact_states=self.c_state,
                                                        contact_forces=self.c_force)
         
