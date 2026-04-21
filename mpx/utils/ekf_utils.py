@@ -117,7 +117,7 @@ def run_state_estimation(dt,
                          contact_pos,
                          Q, 
                          R,
-                         base_pos=None,
+                         init_pos=None,
                          base_acc=None,
                          joint_torque=None,
                          contact_forces=None,
@@ -134,10 +134,8 @@ def run_state_estimation(dt,
     """
     
     # use first pos as init pos if given
-    if base_pos is None:
+    if init_pos is None:
         init_pos = np.zeros((3,))
-    else:
-        init_pos = base_pos[0]
 
     if base_acc is None: 
         base_acc = [None] * len(base_orient)
