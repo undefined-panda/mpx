@@ -119,6 +119,7 @@ def run_state_estimation(dt,
                          R,
                          init_pos=None,
                          base_acc=None,
+                         joint_acc=None,
                          joint_torque=None,
                          contact_forces=None,
                          contact_states=None,
@@ -148,6 +149,7 @@ def run_state_estimation(dt,
         contact_states = [None] * len(base_orient)
         print("Estimating contact state from contact_force and threshold")
     if contact_state_threshold is None: contact_state_threshold = [None] * len(base_orient)
+    if joint_acc is None: joint_acc = [None] * len(joint_acc)
 
     ekf = utils.state_estimation.EKF(init_pos=init_pos, dt=dt, Q_diag=Q, R_diag=R)
 
@@ -167,6 +169,7 @@ def run_state_estimation(dt,
 
     kalman_gain = []
     base_acc_est = []
+    base_acc2_est = []
     c_force_est = []
     z_tilde = []
 
@@ -176,6 +179,7 @@ def run_state_estimation(dt,
                  base_ang_vel=base_ang_vel[i],
                  joint_pos=joint_pos[i],
                  joint_vel=joint_vel[i],
+                 joint_acc=joint_acc[i],
                  joint_torque=joint_torque[i],
                  contact_states=contact_states[i],
                  contact_forces=contact_forces[i],
@@ -189,6 +193,7 @@ def run_state_estimation(dt,
         leg_odom_sim.append(ekf.z)
         leg_odom_pos.append(ekf.leg_odom_pos)
         base_acc_est.append(ekf.base_acc)
+        base_acc2_est.append(ekf.base_acc2)
         c_force_est.append(ekf.c_force)
 
         pos_update_sim.append(ekf.x[:3])
@@ -208,6 +213,7 @@ def run_state_estimation(dt,
               "kalman_gain": np.array(kalman_gain),
               "z_tilde": np.array(z_tilde),
               "base_acc_est": np.array(base_acc_est),
+              "base_acc2_est": np.array(base_acc2_est),
               "c_force_est": np.array(c_force_est)
               }
     

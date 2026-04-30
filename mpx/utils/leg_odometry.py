@@ -29,7 +29,7 @@ class LegOdom():
     """
 
     def __init__(self, init_state):
-        self.env = QuadrupedEnv(robot="go1") # legs_order = ('FL', 'FR', 'RL', 'RR')
+        self.env = QuadrupedEnv(robot="aliengo") # legs_order = ('FL', 'FR', 'RL', 'RR')
 
         self.dt = None
         self.state = State(pos=init_state[:3], vel=init_state[3:])
@@ -148,7 +148,7 @@ class LegOdom():
         data.qpos[:7] = np.array([0, 0 , 0, 1.0, 0, 0, 0])
         data.qpos[7:] = joint_pos
 
-        mujoco.mj_forward(model, data)
+        # mujoco.mj_forward(model, data)
 
         foot_positions = []
         for name in self.env.legs_order:
@@ -181,7 +181,8 @@ class LegOdom():
         self.env.mjData.qvel[:] = np.concatenate([np.zeros(shape=(6,)), qdot])
         
         # calculate lineare jacobian
-        mujoco.mj_forward(self.env.mjModel, self.env.mjData)
+        mujoco.mj_forward(self.env.mjModel, self.env.mjData) # for jacobian
+
         self.lin_jacobian_b = self.env.feet_jacobians(frame="base") # use mj_jac from MuJoCo, defined in QuadrupedEnv
         self.lin_jacobian_w = self.env.feet_jacobians(frame="world")
 

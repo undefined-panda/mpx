@@ -1,6 +1,6 @@
 import numpy as np
 from utils.leg_odometry import LegOdom
-from utils.dynamics_model import estimate_acc_from_contact_force
+from utils.dynamics_model import estimate_acc_from_contact_force, estimate_acc_from_contact_force_v2
 
 class EKF():
     """
@@ -24,8 +24,10 @@ class EKF():
         self.P = self.Q # error covariance
 
         self.leg_odom = LegOdom(init_state=self.x)
+
+        self.verbose = True
     
-    def step(self, base_orient, base_acc, base_ang_vel, joint_pos, joint_vel, joint_torque, contact_states, contact_forces, contact_pos, contact_state_threshold) -> None:
+    def step(self, base_orient, base_acc, base_ang_vel, joint_pos, joint_vel, joint_acc, joint_torque, contact_states, contact_forces, contact_pos, contact_state_threshold) -> None:
         """Kalman Filter algorithmic loop. Alternating between prediction step, gathering new measurement and update step.
 
         Args:
@@ -60,9 +62,19 @@ class EKF():
         # estimate base acceleration with dynamics model
         if base_acc is None:
             body_mass = float(np.sum(self.leg_odom.env.mjModel.body_mass))
-            base_acc = estimate_acc_from_contact_force(m=body_mass,
+            base_acc = estimate_acc_from_contact_force(mass=body_mass,
                                                        contact_states=self.c_state,
                                                        contact_forces=self.c_force)
+            
+            if self.verbose:
+                base_acc2 = estimate_acc_from_contact_force_v2(env=self.leg_odom.env,
+                                                               contact_forces=self.c_force,
+                                                               contact_states=self.c_state,
+                                                               contact_pos=contact_pos,
+                                                               joint_acc=joint_acc,
+                                                               jacobian=self.leg_odom.lin_jacobian_w)
+                # self.verbose = False
+                self.base_acc2 = base_acc2
         
         self.base_acc = base_acc
 
