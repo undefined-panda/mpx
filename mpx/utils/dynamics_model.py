@@ -1,5 +1,6 @@
 import numpy as np
 import mujoco
+from utils.ekf_utils import skew
 
 def estimate_acc_from_contact_force(mass, contact_states, contact_forces) ->  np.ndarray:
     """Estimate base acceleration from contact force by using Newton's second law of motion
@@ -35,32 +36,7 @@ def estimate_acc_from_contact_force(mass, contact_states, contact_forces) ->  np
 
     return acc
 
-def skew(v):
-    return np.array([
-        [ 0,    -v[2],  v[1]],
-        [ v[2],  0,    -v[0]],
-        [-v[1],  v[0],  0   ]
-    ])
-
-def estimate_acc_from_contact_force_v2(env, joint_acc, contact_forces, contact_states, contact_pos, jacobian) -> np.ndarray:
-    """Estimate base acceleration from contact force using Newton's second law of motion
-    
-    This approach takes whole body dynamics into account. The "mujoco.mj_forward" call in leg_odometry.py includes the following:
-    - mujoco.mj_comPos -> for center of mass psition and inertia properties
-    - mujoco.mj_fwdVelocity -> for coriolis/gravitaion force
-    - mujoco.mj_crb -> for mass matrix
-
-    Args:
-        env (gym.Env): Mujoco robot model
-        joint_acc (np.ndarray): Joint acceleration
-        contact_forces (np.ndarray): Contact force
-        contact_states (np.ndarray): Contact state
-        jacobian (np.ndarray): Jacobian
-
-    Returns:
-        np.ndarray: Estimation of base acceleration
-    """
-
+def estimate_acc_from_contact_force_v2(env, joint_acc, contact_forces, contact_states) -> np.ndarray:
     force = np.zeros((3,))
 
     # sum jacobians of all legs that are in contact
@@ -83,38 +59,14 @@ def estimate_acc_from_contact_force_v2(env, joint_acc, contact_forces, contact_s
     
     return base_acc[:3]
 
-def estimate_acc_from_contact_force_v3(env, 
-                                       joint_acc, 
-                                       contact_forces, 
-                                       contact_states, 
-                                       contact_pos_b,
-                                       R,
-                                       jacobian) -> np.ndarray:
-    """Estimate base acceleration from contact force using Newton's second law of motion
-    
-    This approach takes whole body dynamics into account. The "mujoco.mj_forward" call in leg_odometry.py includes the following:
-    - mujoco.mj_comPos -> for center of mass psition and inertia properties
-    - mujoco.mj_fwdVelocity -> for coriolis/gravitaion force
-    - mujoco.mj_crb -> for mass matrix
-
-    Args:
-        env (gym.Env): Mujoco robot model
-        joint_acc (np.ndarray): Joint acceleration
-        contact_forces (np.ndarray): Contact force
-        contact_states (np.ndarray): Contact state
-        jacobian (np.ndarray): Jacobian
-
-    Returns:
-        np.ndarray: Estimation of base acceleration
-    """
-
+def estimate_acc_from_contact_force_v3(env, joint_acc, contact_forces, contact_states, contact_pos_b, R) -> np.ndarray:
     force = np.zeros((6,))
 
     # sum jacobians of all legs that are in contact
     for i in range(4):
         c_i = contact_states[i]
         cf_i = contact_forces[i]
-        cp_i = R @ None # contact position of foot in world frame relative to base, i.e. R @ contact_pos_b
+        cp_i = R @ contact_pos_b[i] # contact position of foot in world frame relative to base, i.e. R @ contact_pos_b
         J = np.concat([np.eye(3), skew(cp_i)]) # also considering angular acceleration
         force += c_i * (J @ cf_i)
 

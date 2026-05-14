@@ -1,8 +1,5 @@
 import numpy as np
-from pathlib import Path
-import utils.state_estimation
 from utils.plot_data import *
-from tqdm import tqdm
 
 def load_custom_dataset(dataset_path, sim_num):
     dataset = np.load(dataset_path)
@@ -109,118 +106,85 @@ def estimate_contact_state(contact_force, threshold):
         return
     return contact_state
 
-def run_state_estimation(dt,
-                         base_orient,
-                         base_ang_vel,
-                         joint_pos,
-                         joint_vel,
-                         contact_pos,
-                         Q, 
-                         R,
-                         init_pos=None,
-                         base_acc=None,
-                         joint_acc=None,
-                         joint_torque=None,
-                         contact_forces=None,
-                         contact_states=None,
-                         contact_state_threshold=None,
-                         result_dir=None,
-                         file_name=None):
-    """_summary_
+def quat_to_rot(orient) -> np.ndarray:
+    """Convert quaternion to rotation matrix (source: https://cookierobotics.com/080/).
 
     Args:
-        sim_num (int): _description_
-        Q (float): Process noise. Smaller values mean trusting the model more
-        R (float): Measurement Noise. Smaller values mean trusting the measurements more
+        orient (np.ndarray | list): quaternion in [w, x, y, z] format
+
+    Returns:
+        np.ndarray: corresponding rotation matrix
     """
+
+    w, x, y, z = orient
+    R = np.array([
+        [2*(w**2 + x**2) - 1, 2*(x*y - w*z)      , 2*(w*y + x*z)      ],
+        [2*(x*y + w*z)      , 2*(w**2 + y**2) - 1, 2*(y*z - w*x)      ],
+        [2*(x*z - w*y)      , 2*(y*z + w*x)      , 2*(w**2 + z**2) - 1]
+    ])
     
-    # use first pos as init pos if given
-    if init_pos is None:
-        init_pos = np.zeros((3,))
+    return R
 
-    if base_acc is None: 
-        base_acc = [None] * len(base_orient)
-        print("Estimating base_acc.")
-    if joint_torque is None: joint_torque = [None] * len(base_orient)
-    if contact_forces is None: 
-        contact_forces = [None] * len(base_orient)
-        print("Estimating contact_force from contact_state and joint_torque")
-    if contact_states is None: 
-        contact_states = [None] * len(base_orient)
-        print("Estimating contact state from contact_force and threshold")
-    if contact_state_threshold is None: contact_state_threshold = [None] * len(base_orient)
-    if joint_acc is None: joint_acc = [None] * len(joint_acc)
+def rot_to_quat(orient):
+    # source: https://www.johndcook.com/blog/2025/05/07/quaternions-and-rotation-matrices/
+    r11, r22, r33 = orient[0,0], orient[1,1], orient[2,2]
+    w = 1/2 * (1 + r11 + r22 + r33)**0.5
+    x = 1/2 * (1 + r11 - r22 - r33)**0.5 * np.sign(orient[2,1] - orient[1,2])
+    y = 1/2 * (1 - r11 + r22 - r33)**0.5 * np.sign(orient[0,2] - orient[2,0])
+    z = 1/2 * (1 - r11 - r22 + r33)**0.5 * np.sign(orient[1,0] - orient[0,1])
 
-    ekf = utils.state_estimation.EKF(init_pos=init_pos, dt=dt, Q_diag=Q, R_diag=R)
+    return np.array([w, x, y, z])
 
-    # results of EKF prediction step
-    pos_predict_sim = []
-    vel_precict_sim = []
-    P_predict_sim = []
+def rpy_to_rot(orient) -> np.ndarray:
+    """Convert rpy angles to rotation matrix.
 
-    # results of leg odometry
-    leg_odom_sim = []
-    leg_odom_pos = []
+    Args:
+        orient (np.ndarray | list): rpy angles in roll, pitch, yaw format
 
-    # results of EKF update step
-    pos_update_sim = []
-    vel_update_sim = []
-    P_update_sim = []
+    Returns:
+        np.ndarray: corresponding rotation matrix
+    """
 
-    kalman_gain = []
-    base_acc_est = []
-    base_acc2_est = []
-    c_force_est = []
-    z_tilde = []
-
-    for i in tqdm(range(len(base_orient)), desc="Estimating state"):
-        ekf.step(base_orient=base_orient[i],
-                 base_acc=base_acc[i],
-                 base_ang_vel=base_ang_vel[i],
-                 joint_pos=joint_pos[i],
-                 joint_vel=joint_vel[i],
-                 joint_acc=joint_acc[i],
-                 joint_torque=joint_torque[i],
-                 contact_states=contact_states[i],
-                 contact_forces=contact_forces[i],
-                 contact_pos=contact_pos[i],
-                 contact_state_threshold=contact_state_threshold)
-
-        pos_predict_sim.append(ekf.x_pred[:3])
-        vel_precict_sim.append(ekf.x_pred[3:])
-        P_predict_sim.append(ekf.P_pred)
-
-        leg_odom_sim.append(ekf.z)
-        leg_odom_pos.append(ekf.leg_odom_pos)
-        base_acc_est.append(ekf.base_acc)
-        base_acc2_est.append(ekf.base_acc2)
-        c_force_est.append(ekf.c_force)
-
-        pos_update_sim.append(ekf.x[:3])
-        vel_update_sim.append(ekf.x[3:])
-        P_update_sim.append(ekf.P)
-        kalman_gain.append(ekf.K)
-        z_tilde.append(ekf.z_tilde)
-
-    result = {"pos_predict": np.array(pos_predict_sim),
-              "vel_predict": np.array(vel_precict_sim),
-              "P_predict": np.array(P_predict_sim),
-              "leg_odom": np.array(leg_odom_sim),
-              "leg_odom_pos": np.array(leg_odom_pos),
-              "pos_update": np.array(pos_update_sim),
-              "vel_update": np.array(vel_update_sim),
-              "P_update": np.array(P_update_sim),
-              "kalman_gain": np.array(kalman_gain),
-              "z_tilde": np.array(z_tilde),
-              "base_acc_est": np.array(base_acc_est),
-              "base_acc2_est": np.array(base_acc2_est),
-              "c_force_est": np.array(c_force_est)
-              }
+    roll, pitch, yaw = orient
+    Rx = np.array([[1, 0, 0],
+                    [0, np.cos(roll), -np.sin(roll)],
+                    [0, np.sin(roll), np.cos(roll)]])
     
-    if result_dir and file_name:
-        save_path = Path.cwd().parent / result_dir
-        save_path.mkdir(parents=True, exist_ok=True)
-        np.savez(f"{save_path}/{file_name}.npz", **result)
-        print(f"Result saved in {save_path}/{file_name}")
+    Ry = np.array([[np.cos(pitch), 0, np.sin(pitch)],
+                    [0, 1, 0],
+                    [-np.sin(pitch), 0, np.cos(pitch)]])
     
-    return result
+    Rz = np.array([[np.cos(yaw), -np.sin(yaw), 0],
+                    [np.sin(yaw), np.cos(yaw), 0],
+                    [0, 0, 1]])
+    
+    # Combined rotation matrix: ZYX sequence
+    R = np.dot(Rz, np.dot(Ry, Rx))
+    return R
+
+def skew(w):
+    w1, w2, w3 = w
+    w_skew = np.array([[0, -w3, w2],
+                       [w3, 0, -w1],
+                       [-w2, w1, 0]])
+    
+    return w_skew
+
+def rodrigues(w, dt):
+    # source: https://en.wikipedia.org/wiki/Rodrigues%27_rotation_formula, http://mainline.brynmawr.edu/~dxu/206-2550-2.pdf
+    w1, w2, w3 = w
+    theta = (w1*w1 + w2*w2 + w3*w3)**0.5
+    w_skew = dt * skew(w)
+    exp_B = np.eye(3) + (np.sin(theta)/theta) * w_skew + ((1-np.cos(theta))/(theta**2)) * (w_skew @ w_skew)
+
+    return exp_B
+
+def is_rotation_matrix(R):
+    return (
+        R.shape == (3, 3) and
+        np.allclose(R.T @ R, np.eye(3)) and  # R^T R = I
+        np.isclose(np.linalg.det(R), 1.0)    # det(R) = 1
+    )
+
+def is_quaternion(q):
+    return q.shape == (4,) and np.isclose(np.linalg.norm(q), 1.0)

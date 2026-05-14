@@ -10,6 +10,8 @@ jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
 from gym_quadruped.quadruped_env import QuadrupedEnv
 from dataclasses import dataclass
 from utils.dynamics_model import estimate_contact_forces
+from utils.ekf_utils import quat_to_rot, rot_to_quat
+from scipy.spatial.transform import Rotation
 
 @dataclass
 class State:
@@ -44,52 +46,6 @@ class LegOdom():
         """
 
         return self.state
-    
-    def quat_to_rot(self, orient) -> np.ndarray:
-        """Convert quaternion to rotation matrix (source: https://cookierobotics.com/080/).
-
-        Args:
-            orient (np.ndarray | list): quaternion in [w, x, y, z] format
-
-        Returns:
-            np.ndarray: corresponding rotation matrix
-        """
-
-        w, x, y, z = orient
-        R = np.array([
-            [2*(w**2 + x**2) - 1, 2*(x*y - w*z)      , 2*(w*y + x*z)      ],
-            [2*(x*y + w*z)      , 2*(w**2 + y**2) - 1, 2*(y*z - w*x)      ],
-            [2*(x*z - w*y)      , 2*(y*z + w*x)      , 2*(w**2 + z**2) - 1]
-        ])
-        
-        return R
-    
-    def rpy_to_rot(self, orient) -> np.ndarray:
-        """Convert rpy angles to rotation matrix.
-
-        Args:
-            orient (np.ndarray | list): rpy angles in roll, pitch, yaw format
-
-        Returns:
-            np.ndarray: corresponding rotation matrix
-        """
-
-        roll, pitch, yaw = orient
-        Rx = np.array([[1, 0, 0],
-                       [0, np.cos(roll), -np.sin(roll)],
-                       [0, np.sin(roll), np.cos(roll)]])
-        
-        Ry = np.array([[np.cos(pitch), 0, np.sin(pitch)],
-                       [0, 1, 0],
-                       [-np.sin(pitch), 0, np.cos(pitch)]])
-        
-        Rz = np.array([[np.cos(yaw), -np.sin(yaw), 0],
-                       [np.sin(yaw), np.cos(yaw), 0],
-                       [0, 0, 1]])
-        
-        # Combined rotation matrix: ZYX sequence
-        R = np.dot(Rz, np.dot(Ry, Rx))
-        return R
 
     def estimate_contact_states(self, contact_force, threshold, joint_torque) -> None:
         """Estimate contact state of legs. Additionally estimating contact force in case of contact_force having single value per feet.
@@ -163,7 +119,7 @@ class LegOdom():
 
         Args:
             dt (float): sampling time
-            base_orient (np.ndarray): base orientation as quaternion in [w, x, y, z] format
+            base_orient (np.ndarray): base orientation as quaternion in [w, x, y, z] format or rotation matrix
             base_ang_vel (np.ndarray): base angular velocity in world frame
             qdot (np.ndarray): joint velocity
             joint_torque (np.ndarray): joint torque
@@ -174,10 +130,15 @@ class LegOdom():
         """
 
         # create rotation matrix
-        self.R = self.quat_to_rot(orient=base_orient) # turn quaternion orientation to rotation matrix: base -> world
+        if base_orient.shape == (4,): # if given as quaternion
+            self.orient_rot = quat_to_rot(orient=base_orient) # turn quaternion orientation to rotation matrix: base -> world
+            self.orient_quat = base_orient
+        else: # if given as rotation matrix
+            self.orient_rot = base_orient
+            self.orient_quat = rot_to_quat(orient=base_orient) # turn rotation matrix to quaternion
 
         # set mjData pos
-        self.env.mjData.qpos[:] = np.concatenate([np.zeros(shape=(3,)), base_orient, joint_pos])
+        self.env.mjData.qpos[:] = np.concatenate([np.zeros(shape=(3,)), self.orient_quat, joint_pos])
         self.env.mjData.qvel[:] = np.concatenate([np.zeros(shape=(6,)), qdot])
         
         # calculate lineare jacobian
@@ -204,20 +165,21 @@ class LegOdom():
 
         # foot position in base frame
         p_b = self.compute_foot_positions_B(joint_pos=joint_pos)
+        self.p_b = p_b
 
         for i in range(len(self.env.legs_order)):
             if not self.contact_states[i]:
                 continue
 
             # transform angular velocity into base frame
-            omega_b = self.R.T @ base_ang_vel 
+            omega_b = self.orient_rot.T @ base_ang_vel 
 
             # velocity estimation
             j_v = self.lin_jacobian_b[self.env.legs_order[i]][:, 6:]
             
             # equation taken from SLAM handbook (Eq (12.21))
             v_b = np.cross(-omega_b, p_b[i]) - (j_v @ qdot) # everything is in base frame
-            v_w = self.R @ v_b # transform to world frame
+            v_w = self.orient_rot @ v_b # transform to world frame
             estimated_lin_vels.append(v_w)
         
         if not estimated_lin_vels:

@@ -92,7 +92,7 @@ def log_values(dataset, sim_num, dt, t, qpos, qvel, qacc, tau_total, contact_sta
     dataset["base_orient"][sim_num].append(qpos[3:7].copy()) # stored as quaternion
     dataset["base_vel"][sim_num].append(qvel[0:3].copy())
     dataset["base_ang_vel"][sim_num].append(qvel[3:6].copy())
-    dataset["base_acc"][sim_num].append(qacc[0:3].copy())
+    dataset["base_acc"][sim_num].append(qacc[0:6].copy())
 
     # --- Joint ---
     dataset["joint_pos"][sim_num].append(qpos[7:].copy())
@@ -106,13 +106,13 @@ def log_values(dataset, sim_num, dt, t, qpos, qvel, qacc, tau_total, contact_sta
     dataset["contact_forces"][sim_num].append(contact_forces.copy())
     dataset["contact_pos_des"][sim_num].append(q.copy())
 
-def save_dataset(dataset):
+def save_dataset(dataset, dataset_path):
     # convert data to numpy array
     for i in dataset:
         dataset[i] = np.stack(dataset[i], axis=0)
 
     next_run = 1
-    for file in Path(dataset_path).glob("*"):
+    for file in Path(dataset_path).glob("*.npz"):
         last_run = int(file.stem.split("run", 1)[1])
         if last_run >= next_run:
             next_run = last_run + 1
@@ -145,7 +145,7 @@ dq_init = env.mjData.qvel.copy()
 
 custom_dataset = {k : [[] for _ in range(num_simulations)] for k in custom_dataset} # add one list per simulation: "base_pos" : [[], [], ...]
 dt = env.simulation_dt # constant for each simulation
-log_and_save = False
+log_and_save = True
 old_dt = 0
 
 for sim_num in range(num_simulations):
@@ -236,4 +236,4 @@ for sim_num in range(num_simulations):
 
 env.close()
 
-if log_and_save: save_dataset(custom_dataset) # ADDED BY ME: save dataset of simulations
+if log_and_save: save_dataset(custom_dataset, dataset_path) # ADDED BY ME: save dataset of simulations
