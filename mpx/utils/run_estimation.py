@@ -8,7 +8,6 @@ def run_state_estimation(dt,
                          base_ang_vel,
                          joint_pos,
                          joint_vel,
-                         contact_pos,
                          Q, 
                          R,
                          init_pos=None,
@@ -19,7 +18,8 @@ def run_state_estimation(dt,
                          contact_states=None,
                          contact_state_threshold=None,
                          result_dir=None,
-                         file_name=None):
+                         file_name=None,
+                         model_name="aliengo"):
     """_summary_
 
     Args:
@@ -45,13 +45,14 @@ def run_state_estimation(dt,
     if contact_state_threshold is None: contact_state_threshold = [None] * len(base_orient)
     if joint_acc is None: joint_acc = [None] * len(joint_acc)
 
-    kf = KF(init_pos=init_pos, dt=dt, Q_diag=Q, R_diag=R)
+    kf = KF(init_pos=init_pos, dt=dt, Q_diag=Q, R_diag=R, model_name=model_name)
 
     # results of EKF prediction step
     pos_predict_sim = []
     vel_precict_sim = []
     ang_vel_predict_sim = []
     orient_predict_sim = []
+    c_force_predict_sim = []
     P_predict_sim = []
 
     # results of leg odometry
@@ -63,6 +64,7 @@ def run_state_estimation(dt,
     vel_update_sim = []
     ang_vel_update_sim = []
     orient_update_sim = []
+    c_force_update_sim = []
     P_update_sim = []
 
     kalman_gain = []
@@ -82,19 +84,20 @@ def run_state_estimation(dt,
                 joint_torque=joint_torque[i],
                 contact_states=contact_states[i],
                 contact_forces=contact_forces[i],
-                contact_pos=contact_pos[i],
                 contact_state_threshold=contact_state_threshold)
 
         pos_predict_sim.append(kf.get_pos("predict"))
         vel_precict_sim.append(kf.get_lin_vel("predict"))
         ang_vel_predict_sim.append(kf.get_ang_vel("predict"))
         orient_predict_sim.append(kf.get_orient("predict"))
+        c_force_predict_sim.append(kf.get_contact_force("predict"))
         P_predict_sim.append(kf.P_pred)
 
         pos_update_sim.append(kf.get_pos())
         vel_update_sim.append(kf.get_lin_vel())
         ang_vel_update_sim.append(kf.get_ang_vel())
         orient_update_sim.append(kf.get_orient())
+        c_force_update_sim.append(kf.get_contact_force())
         P_update_sim.append(kf.P)
 
         leg_odom_sim.append(kf.leg_odom_vel)
@@ -111,6 +114,7 @@ def run_state_estimation(dt,
               "vel_predict": np.array(vel_precict_sim),
               "ang_vel_predict": np.array(ang_vel_predict_sim),
               "orient_predict": np.array(orient_predict_sim),
+              "c_force_predict": np.array(c_force_predict_sim),
               "P_predict": np.array(P_predict_sim),
               "leg_odom": np.array(leg_odom_sim),
               "leg_odom_pos": np.array(leg_odom_pos),
@@ -118,6 +122,7 @@ def run_state_estimation(dt,
               "vel_update": np.array(vel_update_sim),
               "ang_vel_update": np.array(ang_vel_update_sim),
               "orient_update":np.array(orient_update_sim),
+              "c_force_update": np.array(c_force_update_sim),
               "P_update": np.array(P_update_sim),
               "kalman_gain": np.array(kalman_gain),
               "z_tilde": np.array(z_tilde),

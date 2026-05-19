@@ -170,14 +170,14 @@ def skew(w):
     
     return w_skew
 
-def rodrigues(w, dt):
-    # source: https://en.wikipedia.org/wiki/Rodrigues%27_rotation_formula, http://mainline.brynmawr.edu/~dxu/206-2550-2.pdf
-    w1, w2, w3 = w
-    theta = (w1*w1 + w2*w2 + w3*w3)**0.5
-    w_skew = dt * skew(w)
-    exp_B = np.eye(3) + (np.sin(theta)/theta) * w_skew + ((1-np.cos(theta))/(theta**2)) * (w_skew @ w_skew)
+def matrix_exp(w, dt):
+    # orientation estimation. source: https://cwzx.wordpress.com/2013/12/16/numerical-integration-for-rotational-dynamics/
+    w_scaled = dt * w
+    theta = np.linalg.norm(w_scaled) # source: http://mainline.brynmawr.edu/~dxu/206-2550-2.pdf
+    w_skew = skew(w_scaled)
 
-    return exp_B
+    # matrix exponential. source: https://en.wikipedia.org/wiki/Rodrigues%27_rotation_formula
+    return np.eye(3) + (np.sin(theta)/theta) * w_skew + ((1-np.cos(theta))/(theta**2)) * (w_skew @ w_skew)
 
 def is_rotation_matrix(R):
     return (
@@ -186,5 +186,19 @@ def is_rotation_matrix(R):
         np.isclose(np.linalg.det(R), 1.0)    # det(R) = 1
     )
 
+def skew_inverse(S):
+    return np.array([S[2,1], S[0,2], S[1,0]])
+
 def is_quaternion(q):
     return q.shape == (4,) and np.isclose(np.linalg.norm(q), 1.0)
+
+def matrix_log(R):
+    # Winkel der Rotation
+    theta = np.arccos(np.clip((np.trace(R) - 1) / 2, -1, 1))
+    
+    if theta < 1e-6:  # kleine Winkel: Grenzwert
+        return skew_inverse(R - R.T) * 0.5
+    
+    # schiefsymmetrischer Teil -> Rotationsvektor
+    log_matrix = (theta / (2 * np.sin(theta))) * (R - R.T)
+    return skew_inverse(log_matrix)

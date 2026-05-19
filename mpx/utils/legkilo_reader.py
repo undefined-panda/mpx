@@ -92,7 +92,9 @@ class LegKILOReader():
 
             "joint_pos": [],
             "joint_vel": [],
+            "joint_acc": [],
             "joint_torque": [],
+        
             "foot_force": [],
             "contact_pos": [],
             "time_state": [],
@@ -132,6 +134,7 @@ class LegKILOReader():
 
                 data["joint_pos"].append([msg.motorState[i].q for i in range(12)])
                 data["joint_vel"].append([msg.motorState[i].dq for i in range(12)])
+                data["joint_acc"].append([msg.motorState[i].ddq for i in range(12)])
                 data["joint_torque"].append([msg.motorState[i].tauEst for i in range(12)])
 
                 data["contact_pos"].append([[foot.x, foot.y, foot.z] for foot in msg.footPosition2Body])

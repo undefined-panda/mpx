@@ -11,7 +11,6 @@ from gym_quadruped.quadruped_env import QuadrupedEnv
 from dataclasses import dataclass
 from utils.dynamics_model import estimate_contact_forces
 from utils.ekf_utils import quat_to_rot, rot_to_quat
-from scipy.spatial.transform import Rotation
 
 @dataclass
 class State:
@@ -30,8 +29,8 @@ class LegOdom():
     A foot is considered in contact when its stationary over time, i.e. it does not slip. The Ground Reaction Force is used for that.
     """
 
-    def __init__(self, init_state):
-        self.env = QuadrupedEnv(robot="aliengo") # legs_order = ('FL', 'FR', 'RL', 'RR')
+    def __init__(self, init_state, model_name="aliengo"):
+        self.env = QuadrupedEnv(robot=model_name) # legs_order = ('FL', 'FR', 'RL', 'RR')
 
         self.dt = None
         self.state = State(pos=init_state[:3], vel=init_state[3:])
