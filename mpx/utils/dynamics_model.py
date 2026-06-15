@@ -1,6 +1,8 @@
 import numpy as np
 import mujoco
 from utils.ekf_utils import skew
+import jax.numpy as jnp
+import jax
 
 def estimate_acc_from_contact_force(mass, contact_states, contact_forces) ->  np.ndarray:
     """Estimate base acceleration from contact force by using Newton's second law of motion
@@ -83,7 +85,7 @@ def estimate_acc_from_contact_force_v3(env, joint_acc, contact_forces, contact_s
     
     return base_acc[:6]
 
-def estimate_contact_forces(joint_torque, contact_state, legs_order, lin_jacobian_w) ->  np.ndarray:
+def estimate_contact_forces(joint_torque, contact_state, legs_order, lin_jacobian_w) ->  jax.Array:
     """Estimate forces acting on the contact points (feet) using the dynamics model.
 
     Currently: tau = J * f -> f = (J^-1) * tau
@@ -97,10 +99,7 @@ def estimate_contact_forces(joint_torque, contact_state, legs_order, lin_jacobia
     Raises:
         ValueError: error if contact_state or joint_torque are None
     """
-
-    if contact_state is None or joint_torque is None:
-        raise ValueError(f"contact_state and joint_torque are needed to estimate contact_force. contact_state: {contact_state} \t joint_torque: {joint_torque}")
-
+    
     contact_forces = []
 
     # sum jacobians of all legs that are in contact
@@ -110,8 +109,8 @@ def estimate_contact_forces(joint_torque, contact_state, legs_order, lin_jacobia
         J_lin = lin_jacobian_w[leg_name][:, 6 + 3*i : 6 + 3*(i+1)] # create 3x3 matrix of values corresponding to current leg
         tau_leg = joint_torque[3*i : 3*(i+1)] # same for torque
         
-        f_leg = -np.linalg.pinv(J_lin.T) @ tau_leg
+        f_leg = -jnp.linalg.pinv(J_lin.T) @ tau_leg
         c_force = contact_state[i] * f_leg
         contact_forces.append(c_force)
     
-    return np.array(contact_forces)
+    return jnp.array(contact_forces)

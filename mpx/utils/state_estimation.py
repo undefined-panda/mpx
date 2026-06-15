@@ -2,6 +2,7 @@ import numpy as np
 from utils.leg_odometry import LegOdom
 from utils.dynamics_model import *
 from utils.ekf_utils import *
+import jax.numpy as jnp
 
 class KF():
     """
@@ -26,11 +27,11 @@ class KF():
         self.dt = dt # currently using constant dt
 
         # state        
-        self.x = np.concatenate([init_pos, # pos
-                                 np.eye(3).flatten(), # orient as rotation matrix
-                                 np.zeros(3), # v_lin
-                                 np.zeros(3), # v_ang
-                                 np.zeros(12)]) # contact force
+        self.x = jnp.concatenate([init_pos, # pos
+                                  jnp.eye(3).flatten(), # orient as rotation matrix
+                                  jnp.zeros(3), # v_lin
+                                  jnp.zeros(3), # v_ang
+                                  jnp.zeros(12)]) # contact force
 
         self.POS = slice(0, 3)
         self.ORIENT = slice(3, 12)
@@ -43,23 +44,23 @@ class KF():
         # Kalman Filter matrices #
         ##########################
         # state transition matrix
-        self.A = np.eye(30) 
-        self.A[self.POS, self.V_LIN] = self.dt * np.eye(3) # make velocity contribute to position via dt: pos + dt * v_lin
-        self.A[self.ORIENT, self.ORIENT] = np.eye(9) # init for orientation estimation
+        self.A = jnp.eye(30) 
+        self.A = self.A.at[self.POS, self.V_LIN].set(self.dt * jnp.eye(3)) # make velocity contribute to position via dt: pos + dt * v_lin
+        self.A = self.A.at[self.ORIENT, self.ORIENT].set(jnp.eye(9)) # init for orientation estimation
 
         # control input matrix
-        self.B = np.zeros((30,13))
+        self.B = jnp.zeros((30,13))
 
         # observation matrix
-        self.H = np.zeros((21, 30)) # z = [orient_error(3) v_lin(3) v_ang(3) contact_force(12)]
-        self.H[0:3, self.VPHI] = np.eye(3)
-        self.H[3:6, self.V_LIN] = np.eye(3)
-        self.H[6:9, self.V_ANG] = np.eye(3)
-        self.H[9:21, self.C_FORCE] = np.eye(12)
+        self.H = jnp.zeros((21, 30)) # z = [orient_error(3) v_lin(3) v_ang(3) contact_force(12)]
+        self.H = self.H.at[0:3, self.VPHI].set(jnp.eye(3))
+        self.H = self.H.at[3:6, self.V_LIN].set(jnp.eye(3))
+        self.H = self.H.at[6:9, self.V_ANG].set(jnp.eye(3))
+        self.H = self.H.at[9:21, self.C_FORCE].set(jnp.eye(12))
     
         # Kalman Filter noise
-        self.Q = np.diag(Q_diag*np.ones(30)) # process noise. lower value means trusting the model more
-        self.R = np.diag(R_diag*np.ones(self.H.shape[0])) # measurement noise. lower value means trusting the measurement more
+        self.Q = jnp.diag(Q_diag*jnp.ones(30)) # process noise. lower value means trusting the model more
+        self.R = jnp.diag(R_diag*jnp.ones(self.H.shape[0])) # measurement noise. lower value means trusting the measurement more
 
         self.P = self.Q # error covariance
 
@@ -83,15 +84,15 @@ class KF():
     
     def get_orient(self, filter_state="update", form="rotation-matrix"):
         state = self.get_filter_state(filter_state)
-
-        forms = ["flatten", "rotation-matrix", "quaternion"]
-        if form not in forms:
-            return ValueError(f"Chosen orientation form is invalid: {form}. Choose one from: {forms}")
         
-        idx = forms.index(form)
-        orient_forms = [state[self.ORIENT], state[self.ORIENT].reshape((3,3)), rot_to_quat(state[self.ORIENT].reshape((3,3)))]
-        
-        return orient_forms[idx]
+        if form == "flatten":
+            return state[self.ORIENT]
+        elif form == "rotation-matrix":
+            return state[self.ORIENT].reshape((3, 3))
+        elif form == "quaternion":
+            return rot_to_quat(state[self.ORIENT].reshape((3, 3)))
+        else:
+            raise ValueError(f"Chosen orientation form is invalid: {form}. Choose one from: ['flatten', 'rotation-matrix', 'quaternion']")
 
     def get_lin_vel(self, filter_state="update"):
         return self.get_filter_state(filter_state)[self.V_LIN]
@@ -104,14 +105,15 @@ class KF():
     
     def update_A_orientation(self):
         exp_map = matrix_exp(self.get_ang_vel(), self.dt)
-        exp_map = np.block([[a * np.eye(3) for a in row] for row in exp_map]) # adjust to fit in A matrix and make it compatible with flatten rotation matrix
-        self.A[self.ORIENT, self.ORIENT] = exp_map 
+        exp_map_block = jnp.kron(exp_map, jnp.eye(3)) # adjust to fit in A matrix and make it compatible with flatten rotation matrix
+        self.A = self.A.at[self.ORIENT, self.ORIENT].set(exp_map_block)
 
     def update_A_B_contact_forces(self, env, orient, contact_pos_b, contact_state):
         qfrc_bias = env.mjData.qfrc_bias # contains coriolis and gravitational terms for each DOF, shape == (18,)
 
         M = np.zeros((env.mjModel.nv, env.mjModel.nv)) # shape == (18, 18)
         mujoco.mj_fullM(env.mjModel, M, env.mjData.qM)
+        M = jnp.array(M)
 
         H_B = M[:6, :6]
         H_BL = M[:6, 6:18]
@@ -121,21 +123,21 @@ class KF():
         for i in range(4):
             c_i = contact_state[i]
             cp_i = orient @ contact_pos_b[i]
-            J_i = np.vstack([np.eye(3), skew(cp_i)])
-            mass_weighted_jacobian = c_i * (np.linalg.pinv(H_B) @ J_i)
+            J_i = jnp.vstack([jnp.eye(3), skew(cp_i)])
+            mass_weighted_jacobian = c_i * (jnp.linalg.pinv(H_B) @ J_i)
             J_a.append(mass_weighted_jacobian[:3, :])
             J_b.append(mass_weighted_jacobian[3:, :])
 
-        J_new = np.vstack([np.hstack(J_a), np.hstack(J_b)])
+        J_new = jnp.vstack([jnp.hstack(J_a), jnp.hstack(J_b)])
 
-        temp = np.linalg.pinv(H_B)@(-H_BL)
+        temp = jnp.linalg.pinv(H_B)@(-H_BL)
 
-        self.A[12:18, self.C_FORCE] = self.dt * J_new
-        self.B[12:18, :] = self.dt * np.hstack([temp, qfrc_bias[:6].reshape(-1, 1)])
+        self.A = self.A.at[12:18, self.C_FORCE].set(self.dt * J_new)
+        self.B = self.B.at[12:18, :].set(self.dt * jnp.hstack([temp, qfrc_bias[:6].reshape(-1, 1)]))
     
     def step(self, 
              base_orient, 
-             base_acc, 
+            #  base_acc, 
              base_ang_vel, 
              joint_pos, 
              joint_vel, 
@@ -159,11 +161,6 @@ class KF():
             contact_state_threshold (int): contact force threshold indicating contact with the ground 
         """
 
-        norms = np.linalg.norm(self.get_orient(form="quaternion"))
-        if norms.round(4) != 1.0:
-            print(self.get_orient(form="quaternion"))
-            print(self.prev_base_orient)
-        
         self.prev_base_orient = base_orient
 
         # using leg odometry as a measurement for linear velocity
@@ -183,39 +180,40 @@ class KF():
         self.c_state = self.leg_odom.contact_states
 
         # estimate base acceleration with dynamics model
-        if base_acc is None:
-            # body_mass = float(np.sum(self.leg_odom.env.mjModel.body_mass))
-            # base_acc = estimate_acc_from_contact_force(mass=body_mass,
-            #                                         contact_states=self.c_state,
-            #                                         contact_forces=self.c_force)
+        # if base_acc is None:
+        #     # body_mass = float(np.sum(self.leg_odom.env.mjModel.body_mass))
+        #     # base_acc = estimate_acc_from_contact_force(mass=body_mass,
+        #     #                                         contact_states=self.c_state,
+        #     #                                         contact_forces=self.c_force)
             
-            if self.verbose:
-                base_acc2 = estimate_acc_from_contact_force_v2(env=self.leg_odom.env,
-                                                            contact_forces=self.c_force,
-                                                            contact_states=self.c_state,
-                                                            joint_acc=joint_acc)
-                self.base_acc2 = base_acc2
+        #     if self.verbose:
+        #         base_acc2 = estimate_acc_from_contact_force_v2(env=self.leg_odom.env,
+        #                                                     contact_forces=self.c_force,
+        #                                                     contact_states=self.c_state,
+        #                                                     joint_acc=joint_acc)
+        #         self.base_acc2 = base_acc2
 
-                base_acc3 = estimate_acc_from_contact_force_v3(env=self.leg_odom.env,
-                                                            contact_forces=self.c_force,
-                                                            contact_states=self.c_state,
-                                                            joint_acc=joint_acc,
-                                                            contact_pos_b=self.leg_odom.p_b,
-                                                            R=self.leg_odom.orient_rot)
+        #         base_acc3 = estimate_acc_from_contact_force_v3(env=self.leg_odom.env,
+        #                                                     contact_forces=self.c_force,
+        #                                                     contact_states=self.c_state,
+        #                                                     joint_acc=joint_acc,
+        #                                                     contact_pos_b=self.leg_odom.p_b,
+        #                                                     R=self.leg_odom.orient_rot)
                 
-                self.base_acc3 = base_acc3
-                base_acc = base_acc3
+        #         self.base_acc3 = base_acc3
+        #         base_acc = base_acc3
         
-        self.base_acc = base_acc
+        # self.base_acc = base_acc
         
         # if angular velocity contains only zero entries, use previous orientation, else update A matrix
-        if self.get_ang_vel().any(): self.update_A_orientation()
+        if self.get_ang_vel().any():
+            self.update_A_orientation()
 
         # update B matrix since mass distribution changes for each step
         self.update_A_B_contact_forces(env=self.leg_odom.env, orient=self.leg_odom.orient_rot, contact_pos_b=self.leg_odom.p_b, contact_state=self.c_state)
 
         # prediction step with joint acceleration as control input
-        self.predict(u=np.hstack([joint_acc, 1]))
+        self.predict(u=jnp.hstack([joint_acc, 1]))
         # update step. measurements:
         # - leg odom: linear velocity and contact_forces as J * tau
         # - IMU: angular velocity and orientation
@@ -228,11 +226,8 @@ class KF():
             u (np.ndarray): control input vector
         """
 
-        try:
-            x_pred = self.A @ self.x + self.B @ u.T
-            P_pred = self.A @ self.P @ self.A.T + self.Q
-        except ValueError as e:
-            print("Error in ekf.predict", e)
+        x_pred = self.A @ self.x + self.B @ u.T
+        P_pred = self.A @ self.P @ self.A.T + self.Q
 
         self.x_pred = x_pred
         self.P_pred = P_pred
@@ -246,20 +241,19 @@ class KF():
         
         pred_orient = self.get_orient(filter_state="predict")
 
-        z_tilde_vel_force = np.concat([z[1], z[2], z[3]]) - self.H[3:21, :] @ self.x_pred # measurement residual of lin and ang velocity
+        z_tilde_vel_force = jnp.concatenate([z[1], z[2], z[3]]) - self.H[3:21, :] @ self.x_pred # measurement residual of lin and ang velocity
         z_tilde_orient = matrix_log(pred_orient.T @ z[0]) # measurement residual of orientation
-        z_tilde = np.concatenate([z_tilde_orient, z_tilde_vel_force])
+        z_tilde = jnp.concatenate([z_tilde_orient, z_tilde_vel_force])
         self.z_tilde = z_tilde
 
         S = self.H @ self.P_pred @ self.H.T + self.R # residual covariance
-        K = self.P_pred @ self.H.T @ np.linalg.inv(S) # kalman gain
+        K = self.P_pred @ self.H.T @ jnp.linalg.inv(S) # kalman gain
     
         correction = K @ z_tilde
         
         x_update = self.x_pred + correction # update for linear states
-        x_update[self.ORIENT] = (pred_orient @ matrix_exp(correction[self.VPHI], 1)).flatten() # update for orient: R_pred with * exp(δθ) δθ = K @ Log(R_pred.T @ R_meas)
-
-        P_update = (np.eye(K.shape[0]) - K @ self.H) @ self.P_pred
+        x_update = x_update.at[self.ORIENT].set((pred_orient @ matrix_exp(correction[self.VPHI], 1)).flatten()) # update for orient: R_pred with * exp(δθ) δθ = K @ Log(R_pred.T @ R_meas)
+        P_update = (jnp.eye(K.shape[0]) - K @ self.H) @ self.P_pred
 
         self.x = x_update
         self.P = P_update

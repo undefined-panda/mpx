@@ -1,8 +1,10 @@
 import numpy as np
+import jax.numpy as jnp
+import jax
 from utils.plot_data import *
 
 def load_custom_dataset(dataset_path, sim_num):
-    dataset = np.load(dataset_path)
+    dataset = jnp.load(dataset_path)
 
     data = {"num_datasets": len(dataset["time"]),
             "num_datapoints": len(dataset["time"][0]),
@@ -27,13 +29,13 @@ def load_custom_dataset(dataset_path, sim_num):
 
 def compute_pos_from_estimated_vel(velocities, dt):
     positions = []
-    prev_pos = np.zeros((3,))
+    prev_pos = jnp.zeros((3,))
     for vel in velocities:
         next_pos = prev_pos + dt * vel
         positions.append(next_pos)
         prev_pos = next_pos
     
-    return np.array(positions)
+    return jnp.array(positions)
 
 def estimation_error(ground_truth, estimation, title, subplot_title=None, plot=True, return_errors=False):
     errors = ground_truth - np.array(estimation)
@@ -106,7 +108,7 @@ def estimate_contact_state(contact_force, threshold):
         return
     return contact_state
 
-def quat_to_rot(orient) -> np.ndarray:
+def quat_to_rot(orient) -> jax.Array:
     """Convert quaternion to rotation matrix (source: https://cookierobotics.com/080/).
 
     Args:
@@ -117,7 +119,7 @@ def quat_to_rot(orient) -> np.ndarray:
     """
 
     w, x, y, z = orient
-    R = np.array([
+    R = jnp.array([
         [2*(w**2 + x**2) - 1, 2*(x*y - w*z)      , 2*(w*y + x*z)      ],
         [2*(x*y + w*z)      , 2*(w**2 + y**2) - 1, 2*(y*z - w*x)      ],
         [2*(x*z - w*y)      , 2*(y*z + w*x)      , 2*(w**2 + z**2) - 1]
@@ -125,17 +127,59 @@ def quat_to_rot(orient) -> np.ndarray:
     
     return R
 
-def rot_to_quat(orient):
+def rot_to_quat_old(orient):
     # source: https://www.johndcook.com/blog/2025/05/07/quaternions-and-rotation-matrices/
     r11, r22, r33 = orient[0,0], orient[1,1], orient[2,2]
     w = 1/2 * (1 + r11 + r22 + r33)**0.5
-    x = 1/2 * (1 + r11 - r22 - r33)**0.5 * np.sign(orient[2,1] - orient[1,2])
-    y = 1/2 * (1 - r11 + r22 - r33)**0.5 * np.sign(orient[0,2] - orient[2,0])
-    z = 1/2 * (1 - r11 - r22 + r33)**0.5 * np.sign(orient[1,0] - orient[0,1])
+    x = 1/2 * (1 + r11 - r22 - r33)**0.5 * jnp.sign(orient[2,1] - orient[1,2])
+    y = 1/2 * (1 - r11 + r22 - r33)**0.5 * jnp.sign(orient[0,2] - orient[2,0])
+    z = 1/2 * (1 - r11 - r22 + r33)**0.5 * jnp.sign(orient[1,0] - orient[0,1])
 
-    return np.array([w, x, y, z])
+    return jnp.array([w, x, y, z])
 
-def rpy_to_rot(orient) -> np.ndarray:
+def rot_to_quat(orient):
+    R = orient
+    R = R.reshape(3, 3)
+    trace = R[0,0] + R[1,1] + R[2,2]
+    
+    def case0(_):
+        s = 0.5 / jnp.sqrt(trace + 1.0)
+        return jnp.array([0.25 / s,
+                          (R[2,1] - R[1,2]) * s,
+                          (R[0,2] - R[2,0]) * s,
+                          (R[1,0] - R[0,1]) * s])
+    
+    def case1(_):
+        s = 2.0 * jnp.sqrt(1.0 + R[0,0] - R[1,1] - R[2,2])
+        return jnp.array([(R[2,1] - R[1,2]) / s,
+                          0.25 * s,
+                          (R[0,1] + R[1,0]) / s,
+                          (R[0,2] + R[2,0]) / s])
+    
+    def case2(_):
+        s = 2.0 * jnp.sqrt(1.0 + R[1,1] - R[0,0] - R[2,2])
+        return jnp.array([(R[0,2] - R[2,0]) / s,
+                          (R[0,1] + R[1,0]) / s,
+                          0.25 * s,
+                          (R[1,2] + R[2,1]) / s])
+    
+    def case3(_):
+        s = 2.0 * jnp.sqrt(1.0 + R[2,2] - R[0,0] - R[1,1])
+        return jnp.array([(R[1,0] - R[0,1]) / s,
+                          (R[0,2] + R[2,0]) / s,
+                          (R[1,2] + R[2,1]) / s,
+                          0.25 * s])
+    
+    return jax.lax.cond(
+        trace > 0, case0,
+        lambda _: jax.lax.cond(
+            R[0,0] > R[1,1],
+            lambda _: jax.lax.cond(R[0,0] > R[2,2], case1, case3, None),
+            lambda _: jax.lax.cond(R[1,1] > R[2,2], case2, case3, None),
+            None),
+        None)
+
+def rpy_to_rot(orient) -> jax.Array:
     """Convert rpy angles to rotation matrix.
 
     Args:
@@ -146,59 +190,66 @@ def rpy_to_rot(orient) -> np.ndarray:
     """
 
     roll, pitch, yaw = orient
-    Rx = np.array([[1, 0, 0],
-                    [0, np.cos(roll), -np.sin(roll)],
-                    [0, np.sin(roll), np.cos(roll)]])
+    Rx = jnp.array([[1, 0, 0],
+                    [0, jnp.cos(roll), -jnp.sin(roll)],
+                    [0, jnp.sin(roll), jnp.cos(roll)]])
     
-    Ry = np.array([[np.cos(pitch), 0, np.sin(pitch)],
+    Ry = jnp.array([[jnp.cos(pitch), 0, jnp.sin(pitch)],
                     [0, 1, 0],
-                    [-np.sin(pitch), 0, np.cos(pitch)]])
+                    [-jnp.sin(pitch), 0, jnp.cos(pitch)]])
     
-    Rz = np.array([[np.cos(yaw), -np.sin(yaw), 0],
-                    [np.sin(yaw), np.cos(yaw), 0],
+    Rz = jnp.array([[jnp.cos(yaw), -jnp.sin(yaw), 0],
+                    [jnp.sin(yaw), jnp.cos(yaw), 0],
                     [0, 0, 1]])
     
     # Combined rotation matrix: ZYX sequence
-    R = np.dot(Rz, np.dot(Ry, Rx))
+    R = jnp.dot(Rz, jnp.dot(Ry, Rx))
     return R
 
 def skew(w):
     w1, w2, w3 = w
-    w_skew = np.array([[0, -w3, w2],
+    w_skew = jnp.array([[0, -w3, w2],
                        [w3, 0, -w1],
                        [-w2, w1, 0]])
     
     return w_skew
 
-def matrix_exp(w, dt):
+def matrix_exp_old(w, dt):
     # orientation estimation. source: https://cwzx.wordpress.com/2013/12/16/numerical-integration-for-rotational-dynamics/
     w_scaled = dt * w
-    theta = np.linalg.norm(w_scaled) # source: http://mainline.brynmawr.edu/~dxu/206-2550-2.pdf
+    theta = jnp.linalg.norm(w_scaled) # source: http://mainline.brynmawr.edu/~dxu/206-2550-2.pdf
     w_skew = skew(w_scaled)
 
     # matrix exponential. source: https://en.wikipedia.org/wiki/Rodrigues%27_rotation_formula
-    return np.eye(3) + (np.sin(theta)/theta) * w_skew + ((1-np.cos(theta))/(theta**2)) * (w_skew @ w_skew)
+    return jnp.eye(3) + (jnp.sin(theta)/theta) * w_skew + ((1-jnp.cos(theta))/(theta**2)) * (w_skew @ w_skew)
+
+def matrix_exp(w, dt):
+    w_scaled = dt * w
+    theta = jnp.linalg.norm(w_scaled)
+    w_skew = skew(w_scaled)
+    
+    safe_theta = jnp.where(theta < 1e-6, 1.0, theta)
+    exp = (jnp.eye(3) 
+           + (jnp.sin(safe_theta) / safe_theta) * w_skew 
+           + ((1 - jnp.cos(safe_theta)) / safe_theta**2) * (w_skew @ w_skew))
+    
+    return jnp.where(theta < 1e-6, jnp.eye(3) + w_skew, exp)
 
 def is_rotation_matrix(R):
     return (
         R.shape == (3, 3) and
-        np.allclose(R.T @ R, np.eye(3)) and  # R^T R = I
-        np.isclose(np.linalg.det(R), 1.0)    # det(R) = 1
+        jnp.allclose(R.T @ R, jnp.eye(3)) and  # R^T R = I
+        jnp.isclose(jnp.linalg.det(R), 1.0)    # det(R) = 1
     )
 
 def skew_inverse(S):
-    return np.array([S[2,1], S[0,2], S[1,0]])
+    return jnp.array([S[2,1], S[0,2], S[1,0]])
 
 def is_quaternion(q):
-    return q.shape == (4,) and np.isclose(np.linalg.norm(q), 1.0)
+    return q.shape == (4,) and jnp.isclose(jnp.linalg.norm(q), 1.0)
 
 def matrix_log(R):
-    # Winkel der Rotation
-    theta = np.arccos(np.clip((np.trace(R) - 1) / 2, -1, 1))
-    
-    if theta < 1e-6:  # kleine Winkel: Grenzwert
-        return skew_inverse(R - R.T) * 0.5
-    
-    # schiefsymmetrischer Teil -> Rotationsvektor
-    log_matrix = (theta / (2 * np.sin(theta))) * (R - R.T)
-    return skew_inverse(log_matrix)
+    theta = jnp.arccos(jnp.clip((jnp.trace(R) - 1) / 2, -1, 1))
+    log_matrix = (theta / (2 * jnp.sin(theta))) * (R - R.T)
+    result = skew_inverse(log_matrix)
+    return jnp.where(theta < 1e-6, skew_inverse(R - R.T) * 0.5, result)

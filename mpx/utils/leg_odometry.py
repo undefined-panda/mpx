@@ -58,21 +58,17 @@ class LegOdom():
             ValueError: error if contact_force or threshold are None
             ValueError: error if contact_force has invalid shape
         """
-
-        if contact_force is None or threshold is None:
-            raise ValueError(f"contact_force and threshold are needed to estimate the contact state. contact_force: {contact_force} \t threshold: {threshold}")
         
-        contact_force = np.array(contact_force)
+        contact_force = jnp.array(contact_force)
 
         # x, y, z values for force
         if contact_force.shape == (4,3):
-            mask = (np.sqrt(contact_force[:, 0]**2 + contact_force[:, 1]**2) <= contact_force[:, 2])
+            mask = (jnp.sqrt(contact_force[:, 0]**2 + contact_force[:, 1]**2) <= contact_force[:, 2])
             contact_state = (contact_force != 0)[:, 0] & mask
 
         # single value for force
         elif contact_force.shape == (4,):
-            contact_state = contact_force > threshold
-            
+            contact_state = contact_force > threshold            
             if not self.info_log:
                 print("Estimating contact_force from estimated contact_state and joint torque")
                 self.info_log = True
@@ -87,7 +83,7 @@ class LegOdom():
         
         self.contact_states = contact_state
         
-    def compute_foot_positions_B(self, joint_pos) -> np.ndarray:
+    def compute_foot_positions_B(self, joint_pos) -> jax.Array:
         """Compute foot position in base frame
 
         Args:
@@ -111,7 +107,7 @@ class LegOdom():
             pos = data.geom_xpos[geom_id].copy()
             foot_positions.append(pos)
 
-        return np.array(foot_positions)
+        return jnp.array(foot_positions)
 
     def compute_leg_odometry(self, dt, base_orient, base_ang_vel, qdot, joint_torque, joint_pos, contact_state, contact_force, contact_state_threshold) -> None:
         """Estimate robot velocity based on informations from the legs. Using equation (12.21) from SLAM Handbook.
@@ -137,8 +133,8 @@ class LegOdom():
             self.orient_quat = rot_to_quat(orient=base_orient) # turn rotation matrix to quaternion
 
         # set mjData pos
-        self.env.mjData.qpos[:] = np.concatenate([np.zeros(shape=(3,)), self.orient_quat, joint_pos])
-        self.env.mjData.qvel[:] = np.concatenate([np.zeros(shape=(6,)), qdot])
+        self.env.mjData.qpos[:] = jnp.concatenate([jnp.zeros(shape=(3,)), self.orient_quat, joint_pos])
+        self.env.mjData.qvel[:] = jnp.concatenate([jnp.zeros(shape=(6,)), qdot])
         
         # calculate lineare jacobian
         mujoco.mj_forward(self.env.mjModel, self.env.mjData) # for jacobian
@@ -159,33 +155,24 @@ class LegOdom():
             else:
                 self.contact_forces = contact_force
 
-        # motion estimation
-        estimated_lin_vels = []
-
         # foot position in base frame
         p_b = self.compute_foot_positions_B(joint_pos=joint_pos)
         self.p_b = p_b
 
-        for i in range(len(self.env.legs_order)):
-            if not self.contact_states[i]:
-                continue
-
-            # transform angular velocity into base frame
-            omega_b = self.orient_rot.T @ base_ang_vel 
-
-            # velocity estimation
-            j_v = self.lin_jacobian_b[self.env.legs_order[i]][:, 6:]
-            
-            # equation taken from SLAM handbook (Eq (12.21))
-            v_b = np.cross(-omega_b, p_b[i]) - (j_v @ qdot) # everything is in base frame
+        # motion estimation
+        estimated_lin_vels = []
+        for i in range(4):
+            omega_b = self.orient_rot.T @ base_ang_vel # transform angular velocity into base frame
+            j_v = self.lin_jacobian_b[self.env.legs_order[i]][:, 6:] # velocity estimation
+            v_b = jnp.cross(-omega_b, p_b[i]) - (j_v @ qdot) # equation taken from SLAM handbook (Eq (12.21)), everything is in base frame
             v_w = self.orient_rot @ v_b # transform to world frame
-            estimated_lin_vels.append(v_w)
+            estimated_lin_vels.append(jnp.where(self.contact_states[i], v_w, jnp.zeros(3)))
         
         if not estimated_lin_vels:
-            new_vel = np.zeros(3)
+            new_vel = jnp.zeros(3)
             new_pos = self.state.pos
         else:
-            new_vel = np.mean(np.array(estimated_lin_vels), axis=0)
+            new_vel = jnp.mean(jnp.array(estimated_lin_vels), axis=0)
             new_pos = self.state.pos + new_vel * dt # integrate velocity to get position <- estimation of previous step, not measurement
         
         self.state.pos = new_pos

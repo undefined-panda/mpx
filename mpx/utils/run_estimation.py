@@ -2,6 +2,7 @@ from tqdm import tqdm
 from utils.state_estimation import KF
 import numpy as np
 from pathlib import Path
+import jax
 
 def run_state_estimation(dt,
                          base_orient,
@@ -68,15 +69,15 @@ def run_state_estimation(dt,
     P_update_sim = []
 
     kalman_gain = []
-    base_acc_est = []
-    base_acc2_est = []
-    base_acc3_est = []
+    # base_acc_est = []
+    # base_acc2_est = []
+    # base_acc3_est = []
     c_force_est = []
     z_tilde = []
 
     for i in tqdm(range(len(base_orient)), desc="Estimating state"):
         kf.step(base_orient=base_orient[i],
-                base_acc=base_acc[i],
+                # base_acc=base_acc[i],
                 base_ang_vel=base_ang_vel[i],
                 joint_pos=joint_pos[i],
                 joint_vel=joint_vel[i],
@@ -102,9 +103,9 @@ def run_state_estimation(dt,
 
         leg_odom_sim.append(kf.leg_odom_vel)
         leg_odom_pos.append(kf.leg_odom_pos)
-        base_acc_est.append(kf.base_acc)
-        base_acc2_est.append(kf.base_acc2)
-        base_acc3_est.append(kf.base_acc3)
+        # base_acc_est.append(kf.base_acc)
+        # base_acc2_est.append(kf.base_acc2)
+        # base_acc3_est.append(kf.base_acc3)
         c_force_est.append(kf.c_force)
 
         kalman_gain.append(kf.K)
@@ -126,9 +127,9 @@ def run_state_estimation(dt,
               "P_update": np.array(P_update_sim),
               "kalman_gain": np.array(kalman_gain),
               "z_tilde": np.array(z_tilde),
-              "base_acc_est": np.array(base_acc_est),
-              "base_acc2_est": np.array(base_acc2_est),
-              "base_acc3_est": np.array(base_acc3_est),
+            #   "base_acc_est": np.array(base_acc_est),
+            #   "base_acc2_est": np.array(base_acc2_est),
+            #   "base_acc3_est": np.array(base_acc3_est),
               "c_force_est": np.array(c_force_est)
               }
     
@@ -138,4 +139,6 @@ def run_state_estimation(dt,
         np.savez(f"{save_path}/{file_name}.npz", **result)
         print(f"Result saved in {save_path}/{file_name}")
     
+    jax.clear_caches()
+
     return result, kf
