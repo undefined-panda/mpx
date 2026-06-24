@@ -1,260 +1,187 @@
 import numpy as np
-from utils.leg_odometry import LegOdom
-from utils.dynamics_model import *
-from utils.ekf_utils import *
-import jax.numpy as jnp
+import mujoco
+from utils.kf_utils import matrix_exp, matrix_log, skew
+
 
 class KF():
     """
-    This class imeplemnts a Kalman Filter using Leg Odometry as measurement.
+    Kalman Filter using Leg Odometry as measurement.
 
-    The state consists of:
+    The linear state consists of:
     - position
-    - orientation (as a flattened orientation matrix)
     - linear velocity
     - angular velocity
-    - contact force (as a flattened vector containing force values for each foot)
+    - contact force (flattened, one 3-vector per foot)
+    - attitude error: a 3-dim error-state placeholder used only to couple the
+      orientation correction into the shared Kalman gain. It is reset to zero
+      after every update (standard error-state/multiplicative EKF pattern).
 
-    The control input is the joint acceleration, used to estimate the base acceleration inside the kalman filter.
+    Orientation itself is tracked separately as a 3x3 rotation matrix (`self.orient`)
+    since it does not evolve linearly and cannot be part of a linear state vector.
+
+    The control input is the joint acceleration (+ a constant bias term), used to
+    estimate the base acceleration inside the filter via the robot dynamics.
 
     The measurements are:
+    - orientation coming from the IMU
     - linear velocity coming from leg odometry
-    - angular velocity coming from IMU
-    - orientation coming from IMU
+    - angular velocity coming from the IMU
+    - contact force
     """
 
-    def __init__(self, init_pos, dt, Q_diag=1e-2, R_diag=1e-2, model_name="aliengo"):
-        self.dt = dt # currently using constant dt
+    def __init__(self, dt, Q_diag, R_diag, contact_coupling="dynamics", contact_force_decay="constant"):
+        """
+        Args:
+            contact_coupling (str): how contact force couples into lin_vel/ang_vel in A/B:
+                - "dynamics": mass-matrix-weighted contact Jacobian (physically correct, default)
+                - "direct": geometric contact Jacobian without the mass-matrix weighting
+                  (contact force enters with coefficient 1 instead of pinv(H_B))
+                - "identity": contact_state-gated identity on lin_vel only, no angular
+                  coupling and no geometric leverage at all
+            contact_force_decay (str): behaviour of the C_FORCE->C_FORCE block of A
+                ("the bottom-right corner"):
+                - "constant": contact force prediction persists unchanged (default)
+                - "contact_gated": contact force prediction decays to zero for feet
+                  that are currently not in contact
+        """
 
-        # state        
-        self.x = jnp.concatenate([init_pos, # pos
-                                  jnp.eye(3).flatten(), # orient as rotation matrix
-                                  jnp.zeros(3), # v_lin
-                                  jnp.zeros(3), # v_ang
-                                  jnp.zeros(12)]) # contact force
+        self.dt = dt
+        self.contact_coupling = contact_coupling
+        self.contact_force_decay = contact_force_decay
 
+        # state
         self.POS = slice(0, 3)
-        self.ORIENT = slice(3, 12)
-        self.VPHI = slice(3, 6)
-        self.V_LIN = slice(12, 15)
-        self.V_ANG = slice(15, 18)
-        self.C_FORCE = slice(18, 30)
+        self.LIN_VEL = slice(3, 6)
+        self.ANG_VEL = slice(6, 9)
+        self.C_FORCE = slice(9, 21)
+        self.ATT_ERR = slice(21, 24)
+        self.DYN = slice(3, 9)  # lin_vel + ang_vel, coupled to contact forces
 
-        ##########################
-        # Kalman Filter matrices #
-        ##########################
+        self.x = np.zeros(24)
+        self.orient = np.eye(3)  # nominal orientation, kept outside the linear state
+
         # state transition matrix
-        self.A = jnp.eye(30) 
-        self.A = self.A.at[self.POS, self.V_LIN].set(self.dt * jnp.eye(3)) # make velocity contribute to position via dt: pos + dt * v_lin
-        self.A = self.A.at[self.ORIENT, self.ORIENT].set(jnp.eye(9)) # init for orientation estimation
+        self.A = np.eye(self.x.shape[0])
+        self.A[self.POS, self.LIN_VEL] = self.dt * np.eye(3)
 
-        # control input matrix
-        self.B = jnp.zeros((30,13))
+        # control input matrix: 12 joint accelerations + 1 bias term
+        self.B = np.zeros((self.x.shape[0], 13))
 
-        # observation matrix
-        self.H = jnp.zeros((21, 30)) # z = [orient_error(3) v_lin(3) v_ang(3) contact_force(12)]
-        self.H = self.H.at[0:3, self.VPHI].set(jnp.eye(3))
-        self.H = self.H.at[3:6, self.V_LIN].set(jnp.eye(3))
-        self.H = self.H.at[6:9, self.V_ANG].set(jnp.eye(3))
-        self.H = self.H.at[9:21, self.C_FORCE].set(jnp.eye(12))
-    
-        # Kalman Filter noise
-        self.Q = jnp.diag(Q_diag*jnp.ones(30)) # process noise. lower value means trusting the model more
-        self.R = jnp.diag(R_diag*jnp.ones(self.H.shape[0])) # measurement noise. lower value means trusting the measurement more
+        # observation matrix: z = [att_err(3), lin_vel(3), ang_vel(3), c_force(12)]
+        self.H = np.zeros((21, self.x.shape[0]))
+        self.H[0:3, self.ATT_ERR] = np.eye(3)
+        self.H[3:6, self.LIN_VEL] = np.eye(3)
+        self.H[6:9, self.ANG_VEL] = np.eye(3)
+        self.H[9:21, self.C_FORCE] = np.eye(12)
 
-        self.P = self.Q # error covariance
-
-        self.leg_odom = LegOdom(init_state=self.x, model_name=model_name)
-
-        self.verbose = True
+        self.Q = np.diag(Q_diag * np.ones(self.x.shape[0]))  # process noise
+        self.R = np.diag(R_diag * np.ones(self.H.shape[0]))  # measurement noise
+        self.P = self.Q.copy()  # error covariance
 
         self.filter_states = ["predict", "update"]
 
-    def get_filter_state(self, filter_state):
+    def get_filter_state(self, filter_state, orient=False):
         if filter_state not in self.filter_states:
-            return ValueError(f"Invalid filter state: {filter_state}")
-        
-        if filter_state == "predict": state = self.x_pred
-        if filter_state == "update": state = self.x
+            raise ValueError(f"Invalid filter state: {filter_state}")
+
+        if orient:
+            state = self.orient_pred if filter_state == "predict" else self.orient
+        else:
+            state = self.x_pred if filter_state == "predict" else self.x
 
         return state
-    
-    def get_pos(self, filter_state="update"):
-        return self.get_filter_state(filter_state)[self.POS]
-    
-    def get_orient(self, filter_state="update", form="rotation-matrix"):
-        state = self.get_filter_state(filter_state)
-        
-        if form == "flatten":
-            return state[self.ORIENT]
-        elif form == "rotation-matrix":
-            return state[self.ORIENT].reshape((3, 3))
-        elif form == "quaternion":
-            return rot_to_quat(state[self.ORIENT].reshape((3, 3)))
-        else:
-            raise ValueError(f"Chosen orientation form is invalid: {form}. Choose one from: ['flatten', 'rotation-matrix', 'quaternion']")
 
-    def get_lin_vel(self, filter_state="update"):
-        return self.get_filter_state(filter_state)[self.V_LIN]
+    def get_pos(self, filter_state="update"): return self.get_filter_state(filter_state)[self.POS]
 
-    def get_ang_vel(self, filter_state="update"):
-        return self.get_filter_state(filter_state)[self.V_ANG]
-    
-    def get_contact_force(self, filter_state="update"):
-        return self.get_filter_state(filter_state)[self.C_FORCE].reshape((4,3))
-    
-    def update_A_orientation(self):
-        exp_map = matrix_exp(self.get_ang_vel(), self.dt)
-        exp_map_block = jnp.kron(exp_map, jnp.eye(3)) # adjust to fit in A matrix and make it compatible with flatten rotation matrix
-        self.A = self.A.at[self.ORIENT, self.ORIENT].set(exp_map_block)
+    def get_lin_vel(self, filter_state="update"): return self.get_filter_state(filter_state)[self.LIN_VEL]
+
+    def get_ang_vel(self, filter_state="update"): return self.get_filter_state(filter_state)[self.ANG_VEL]
+
+    def get_contact_force(self, filter_state="update"): return self.get_filter_state(filter_state)[self.C_FORCE].reshape((4, 3))
+
+    def get_orient(self, filter_state="update"): return self.get_filter_state(filter_state, orient=True)
 
     def update_A_B_contact_forces(self, env, orient, contact_pos_b, contact_state):
-        qfrc_bias = env.mjData.qfrc_bias # contains coriolis and gravitational terms for each DOF, shape == (18,)
-
-        M = np.zeros((env.mjModel.nv, env.mjModel.nv)) # shape == (18, 18)
-        mujoco.mj_fullM(env.mjModel, M, env.mjData.qM)
-        M = jnp.array(M)
-
-        H_B = M[:6, :6]
-        H_BL = M[:6, 6:18]
-
-        J_a = [] # upper part, only for linear acceleration
-        J_b = [] # lower part, only for angular acceleration
-        for i in range(4):
-            c_i = contact_state[i]
-            cp_i = orient @ contact_pos_b[i]
-            J_i = jnp.vstack([jnp.eye(3), skew(cp_i)])
-            mass_weighted_jacobian = c_i * (jnp.linalg.pinv(H_B) @ J_i)
-            J_a.append(mass_weighted_jacobian[:3, :])
-            J_b.append(mass_weighted_jacobian[3:, :])
-
-        J_new = jnp.vstack([jnp.hstack(J_a), jnp.hstack(J_b)])
-
-        temp = jnp.linalg.pinv(H_B)@(-H_BL)
-
-        self.A = self.A.at[12:18, self.C_FORCE].set(self.dt * J_new)
-        self.B = self.B.at[12:18, :].set(self.dt * jnp.hstack([temp, qfrc_bias[:6].reshape(-1, 1)]))
-    
-    def step(self, 
-             base_orient, 
-            #  base_acc, 
-             base_ang_vel, 
-             joint_pos, 
-             joint_vel, 
-             joint_acc, 
-             joint_torque, 
-             contact_states, 
-             contact_forces,
-             contact_state_threshold) -> None:
-        """Kalman Filter algorithmic loop. Alternating between prediction step, gathering new measurement and update step.
+        """Update the contact-force coupling in A/B, since the mass distribution / contact
+        Jacobian changes every step.
 
         Args:
-            base_orient (np.ndarray): base orientation as quaternion in [w, x, y, z] format
-            base_acc (np.ndarray | None): base acceleration
-            base_ang_vel (np.ndarray): base angular velocity (from IMU)
-            joint_pos (np.ndarray): joint position
-            joint_vel (np.ndarray): joint velocity
-            joint_torque (np.ndarray): joint torque
-            contact_states (np.ndarray): contact state of legs with ground
-            contact_forces (np.ndarray): force acting on the contact point during stance phase
-            contact_pos (np.ndarray): leg position during contact
-            contact_state_threshold (int): contact force threshold indicating contact with the ground 
+            env: simulation environment providing the mujoco model/data
+            orient (np.ndarray): current orientation estimate (3x3), used to rotate
+                contact positions from base to world frame
+            contact_pos_b (np.ndarray): foot positions in base frame, shape (4, 3)
+            contact_state (np.ndarray): boolean/float contact state per foot, shape (4,)
         """
 
-        self.prev_base_orient = base_orient
+        need_mass_matrix = self.contact_coupling == "dynamics"
+        if need_mass_matrix:
+            qfrc_bias = env.mjData.qfrc_bias  # coriolis + gravitational terms per DOF, shape == (18,)
 
-        # using leg odometry as a measurement for linear velocity
-        self.leg_odom.compute_leg_odometry(dt=self.dt,
-                                           base_orient=self.get_orient(), # reshape flatten rotation matrix to 3x3 matrix
-                                           base_ang_vel=base_ang_vel,
-                                           qdot=joint_vel,
-                                           joint_torque=joint_torque,
-                                           joint_pos=joint_pos,
-                                           contact_state=contact_states,
-                                           contact_force=contact_forces,
-                                           contact_state_threshold=contact_state_threshold)
-        
-        self.leg_odom_vel = self.leg_odom.state.vel
-        self.leg_odom_pos = self.leg_odom.state.pos
-        self.c_force = self.leg_odom.contact_forces
-        self.c_state = self.leg_odom.contact_states
+            M = np.zeros((env.mjModel.nv, env.mjModel.nv))  # shape == (18, 18)
+            mujoco.mj_fullM(env.mjModel, M, env.mjData.qM)
 
-        # estimate base acceleration with dynamics model
-        # if base_acc is None:
-        #     # body_mass = float(np.sum(self.leg_odom.env.mjModel.body_mass))
-        #     # base_acc = estimate_acc_from_contact_force(mass=body_mass,
-        #     #                                         contact_states=self.c_state,
-        #     #                                         contact_forces=self.c_force)
-            
-        #     if self.verbose:
-        #         base_acc2 = estimate_acc_from_contact_force_v2(env=self.leg_odom.env,
-        #                                                     contact_forces=self.c_force,
-        #                                                     contact_states=self.c_state,
-        #                                                     joint_acc=joint_acc)
-        #         self.base_acc2 = base_acc2
+            H_B = M[:6, :6]
+            H_BL = M[:6, 6:18]
+            H_B_inv = np.linalg.pinv(H_B)
 
-        #         base_acc3 = estimate_acc_from_contact_force_v3(env=self.leg_odom.env,
-        #                                                     contact_forces=self.c_force,
-        #                                                     contact_states=self.c_state,
-        #                                                     joint_acc=joint_acc,
-        #                                                     contact_pos_b=self.leg_odom.p_b,
-        #                                                     R=self.leg_odom.orient_rot)
-                
-        #         self.base_acc3 = base_acc3
-        #         base_acc = base_acc3
-        
-        # self.base_acc = base_acc
-        
-        # if angular velocity contains only zero entries, use previous orientation, else update A matrix
-        if self.get_ang_vel().any():
-            self.update_A_orientation()
+        J_a = []  # upper part, only for linear acceleration
+        J_b = []  # lower part, only for angular acceleration
+        for i in range(4):
+            cp_i = orient @ contact_pos_b[i]
+            if self.contact_coupling == "dynamics":
+                J_i = np.vstack([np.eye(3), skew(cp_i)])
+                block = contact_state[i] * (H_B_inv @ J_i)
+            elif self.contact_coupling == "direct":
+                block = contact_state[i] * np.vstack([np.eye(3), skew(cp_i)])
+            elif self.contact_coupling == "identity":
+                block = contact_state[i] * np.vstack([np.eye(3), np.zeros((3, 3))])
+            else:
+                raise ValueError(f"Unknown contact_coupling mode: {self.contact_coupling}")
+            J_a.append(block[:3, :])
+            J_b.append(block[3:, :])
 
-        # update B matrix since mass distribution changes for each step
-        self.update_A_B_contact_forces(env=self.leg_odom.env, orient=self.leg_odom.orient_rot, contact_pos_b=self.leg_odom.p_b, contact_state=self.c_state)
+        J_new = np.vstack([np.hstack(J_a), np.hstack(J_b)])
+        self.A[self.DYN, self.C_FORCE] = self.dt * J_new
 
-        # prediction step with joint acceleration as control input
-        self.predict(u=jnp.hstack([joint_acc, 1]))
-        # update step. measurements:
-        # - leg odom: linear velocity and contact_forces as J * tau
-        # - IMU: angular velocity and orientation
-        self.update(z=[quat_to_rot(base_orient), self.leg_odom_vel, base_ang_vel, self.c_force.flatten()])
+        if need_mass_matrix:
+            self.B[self.DYN, 0:12] = self.dt * (H_B_inv @ (-H_BL))
+            self.B[self.DYN, 12] = self.dt * (H_B_inv @ (-qfrc_bias[:6]))
+        else:
+            # the joint-acc/bias coupling is derived from the mass matrix and is only
+            # meaningful together with the "dynamics" contact_coupling mode
+            self.B[self.DYN, :] = 0.0
+
+        if self.contact_force_decay == "contact_gated":
+            self.A[self.C_FORCE, self.C_FORCE] = np.diag(np.repeat(contact_state, 3))
 
     def predict(self, u):
-        """Prediction step of Kalman Filter. Estimate robot state based on previous estimation.
+        """Prediction step. Estimate robot state based on previous estimation.
 
         Args:
-            u (np.ndarray): control input vector
+            u (np.ndarray): control input, [joint_acc(12), bias(1)]
         """
 
-        x_pred = self.A @ self.x + self.B @ u.T
-        P_pred = self.A @ self.P @ self.A.T + self.Q
+        self.x_pred = self.A @ self.x + self.B @ u
+        self.P_pred = self.A @ self.P @ self.A.T + self.Q
+        self.orient_pred = self.orient @ matrix_exp(self.x_pred[self.ANG_VEL], self.dt)
 
-        self.x_pred = x_pred
-        self.P_pred = P_pred
-    
     def update(self, z):
-        """Update step of Kalman Filter. Update estimation with consideration of measurement, comes from leg odometry.
+        """Update step. Fuse the prediction with the measurement.
 
         Args:
-            z (np.ndarray): measurement
+            z (np.ndarray): measurement, [orient(9, flattened rotation matrix),
+                lin_vel(3), ang_vel(3), c_force(12)]
         """
-        
-        pred_orient = self.get_orient(filter_state="predict")
 
-        z_tilde_vel_force = jnp.concatenate([z[1], z[2], z[3]]) - self.H[3:21, :] @ self.x_pred # measurement residual of lin and ang velocity
-        z_tilde_orient = matrix_log(pred_orient.T @ z[0]) # measurement residual of orientation
-        z_tilde = jnp.concatenate([z_tilde_orient, z_tilde_vel_force])
-        self.z_tilde = z_tilde
+        z_orient = z[0:9].reshape((3, 3))
+        z_tilde_orient = matrix_log(self.orient_pred.T @ z_orient)  # body-frame orientation error
+        z_tilde_lin = z[9:27] - self.H[3:21, :] @ self.x_pred
+        z_tilde = np.concatenate([z_tilde_orient, z_tilde_lin])
 
-        S = self.H @ self.P_pred @ self.H.T + self.R # residual covariance
-        K = self.P_pred @ self.H.T @ jnp.linalg.inv(S) # kalman gain
-    
-        correction = K @ z_tilde
-        
-        x_update = self.x_pred + correction # update for linear states
-        x_update = x_update.at[self.ORIENT].set((pred_orient @ matrix_exp(correction[self.VPHI], 1)).flatten()) # update for orient: R_pred with * exp(δθ) δθ = K @ Log(R_pred.T @ R_meas)
-        P_update = (jnp.eye(K.shape[0]) - K @ self.H) @ self.P_pred
+        S = self.H @ self.P_pred @ self.H.T + self.R  # residual covariance
+        K = self.P_pred @ self.H.T @ np.linalg.inv(S)  # kalman gain
 
-        self.x = x_update
-        self.P = P_update
-        self.K = K
+        self.x = self.x_pred + K @ z_tilde
+        self.orient = self.orient_pred @ matrix_exp(self.x[self.ATT_ERR], 1)
+        self.x[self.ATT_ERR] = 0.0  # reset error state, now folded into self.orient
+        self.P = (np.eye(K.shape[0]) - K @ self.H) @ self.P_pred

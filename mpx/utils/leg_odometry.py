@@ -1,16 +1,10 @@
 import numpy as np
-import jax.numpy as jnp
-import jax
 import mujoco
-# Update JAX configuration
-jax.config.update("jax_compilation_cache_dir", "./jax_cache")
-jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
-jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
 
 from gym_quadruped.quadruped_env import QuadrupedEnv
 from dataclasses import dataclass
 from utils.dynamics_model import estimate_contact_forces
-from utils.ekf_utils import quat_to_rot, rot_to_quat
+from mpx.utils.kf_utils import quat_to_rot, rot_to_quat
 
 @dataclass
 class State:
@@ -59,12 +53,13 @@ class LegOdom():
             ValueError: error if contact_force has invalid shape
         """
         
-        contact_force = jnp.array(contact_force)
+        contact_force = np.array(contact_force)
 
         # x, y, z values for force
         if contact_force.shape == (4,3):
-            mask = (jnp.sqrt(contact_force[:, 0]**2 + contact_force[:, 1]**2) <= contact_force[:, 2])
+            mask = (np.sqrt(contact_force[:, 0]**2 + contact_force[:, 1]**2) <= contact_force[:, 2])
             contact_state = (contact_force != 0)[:, 0] & mask
+            self.contact_forces = contact_force
 
         # single value for force
         elif contact_force.shape == (4,):
@@ -83,7 +78,7 @@ class LegOdom():
         
         self.contact_states = contact_state
         
-    def compute_foot_positions_B(self, joint_pos) -> jax.Array:
+    def compute_foot_positions_B(self, joint_pos):
         """Compute foot position in base frame
 
         Args:
@@ -99,7 +94,7 @@ class LegOdom():
         data.qpos[:7] = np.array([0, 0 , 0, 1.0, 0, 0, 0])
         data.qpos[7:] = joint_pos
 
-        # mujoco.mj_forward(model, data)
+        mujoco.mj_kinematics(model, data)  # propagate qpos -> geom_xpos (mj_forward is not needed, cheaper)
 
         foot_positions = []
         for name in self.env.legs_order:
@@ -107,7 +102,7 @@ class LegOdom():
             pos = data.geom_xpos[geom_id].copy()
             foot_positions.append(pos)
 
-        return jnp.array(foot_positions)
+        return np.array(foot_positions)
 
     def compute_leg_odometry(self, dt, base_orient, base_ang_vel, qdot, joint_torque, joint_pos, contact_state, contact_force, contact_state_threshold) -> None:
         """Estimate robot velocity based on informations from the legs. Using equation (12.21) from SLAM Handbook.
@@ -133,8 +128,8 @@ class LegOdom():
             self.orient_quat = rot_to_quat(orient=base_orient) # turn rotation matrix to quaternion
 
         # set mjData pos
-        self.env.mjData.qpos[:] = jnp.concatenate([jnp.zeros(shape=(3,)), self.orient_quat, joint_pos])
-        self.env.mjData.qvel[:] = jnp.concatenate([jnp.zeros(shape=(6,)), qdot])
+        self.env.mjData.qpos[:] = np.concatenate([np.zeros(shape=(3,)), self.orient_quat, joint_pos])
+        self.env.mjData.qvel[:] = np.concatenate([np.zeros(shape=(6,)), qdot])
         
         # calculate lineare jacobian
         mujoco.mj_forward(self.env.mjModel, self.env.mjData) # for jacobian
@@ -164,15 +159,15 @@ class LegOdom():
         for i in range(4):
             omega_b = self.orient_rot.T @ base_ang_vel # transform angular velocity into base frame
             j_v = self.lin_jacobian_b[self.env.legs_order[i]][:, 6:] # velocity estimation
-            v_b = jnp.cross(-omega_b, p_b[i]) - (j_v @ qdot) # equation taken from SLAM handbook (Eq (12.21)), everything is in base frame
+            v_b = np.cross(-omega_b, p_b[i]) - (j_v @ qdot) # equation taken from SLAM handbook (Eq (12.21)), everything is in base frame
             v_w = self.orient_rot @ v_b # transform to world frame
-            estimated_lin_vels.append(jnp.where(self.contact_states[i], v_w, jnp.zeros(3)))
+            estimated_lin_vels.append(np.where(self.contact_states[i], v_w, np.zeros(3)))
         
         if not estimated_lin_vels:
-            new_vel = jnp.zeros(3)
+            new_vel = np.zeros(3)
             new_pos = self.state.pos
         else:
-            new_vel = jnp.mean(jnp.array(estimated_lin_vels), axis=0)
+            new_vel = np.mean(np.array(estimated_lin_vels), axis=0)
             new_pos = self.state.pos + new_vel * dt # integrate velocity to get position <- estimation of previous step, not measurement
         
         self.state.pos = new_pos

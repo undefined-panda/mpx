@@ -3,7 +3,7 @@ from tqdm import tqdm
 import numpy as np
 from pathlib import Path
 import os
-from utils.ekf_utils import quat_to_rot
+from mpx.utils.kf_utils import quat_to_rot
 
 class LegKILOReader():
     """Class to read ROS .bag file and ground truth .txt-file from Leg KILO dataset (https://github.com/ouguangjun/legkilo-dataset).

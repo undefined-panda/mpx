@@ -3,7 +3,6 @@ This file creates plots from custom datasets. The plots are for 'mjx_quad.py'.
 """
 
 import numpy as np
-from pathlib import Path
 import matplotlib.pyplot as plt
 import os
 
@@ -31,8 +30,59 @@ def base_plot(time, base_pos):
     plt.grid(True)
     plt.show()
 
-def compare_estimation_plot(time, 
-                            gt_values, 
+def contact_force_mse(gt_contact_force, estimates):
+    """Per-leg, per-axis MSE between several contact-force estimates and ground truth.
+
+    Args:
+        gt_contact_force (np.ndarray): ground truth contact force, shape (T, 4, 3)
+        estimates (dict[str, np.ndarray]): name -> estimate, each shape (T, 4, 3)
+
+    Returns:
+        dict[str, np.ndarray]: name -> MSE per leg/axis, shape (4, 3)
+    """
+
+    mse = {name: np.mean((gt_contact_force - est) ** 2, axis=0) for name, est in estimates.items()}
+
+    leg_labels = np.arange(1, 5)
+    force_labels = ["x", "y", "z"]
+    print("leg-axis".ljust(10) + "".join(f"{name:>18s}" for name in estimates))
+    for i in range(4):
+        for j in range(3):
+            row = f"{leg_labels[i]}-{force_labels[j]}".ljust(10)
+            row += "".join(f"{mse[name][i, j]:18.4f}" for name in estimates)
+            print(row)
+
+    return mse
+
+
+def plot_contact_force_comparison(gt_contact_force, estimates, num_point=500, colors=None):
+    """Plot several contact-force estimates against ground truth, one subplot per leg/axis.
+
+    Args:
+        gt_contact_force (np.ndarray): ground truth contact force, shape (T, 4, 3)
+        estimates (dict[str, np.ndarray]): name -> estimate, each shape (T, 4, 3)
+        num_point (int): number of samples to plot
+    """
+
+    if colors is None: colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+
+    _, axes = plt.subplots(4, 3, figsize=(50, 20))
+
+    leg_labels = np.arange(1, 5)
+    force_labels = ["x", "y", "z"]
+    for i in range(4):
+        for j in range(3):
+            axes[i, j].plot(np.arange(num_point), gt_contact_force[:num_point, i, j], "--", label="gt", color="black")
+            for k, (name, est) in enumerate(estimates.items()):
+                axes[i, j].plot(np.arange(num_point), est[:num_point, i, j], label=name, alpha=0.8, color=colors[k % len(colors)])
+            axes[i, j].set_ylabel(f"leg {leg_labels[i]} - {force_labels[j]}")
+            axes[i, j].legend()
+
+    plt.tight_layout()
+    plt.show()
+
+def compare_estimation_plot(time,
+                            gt_values,
                             gt_label, 
                             pred_values, 
                             pred_labels, 
@@ -77,7 +127,7 @@ def compare_estimation_plot(time,
     num_plots = 1 if combined_plot else len(pred_values)
     num_dim = gt_shape[1]
     if time_window is not None:
-        if not isinstance(time_window, list): 
+        if not isinstance(time_window, list):
             print("time_window must be type list")
             return
         if len(time_window) != 2:
@@ -85,49 +135,35 @@ def compare_estimation_plot(time,
             return
     fig_size = (16,8) if combined_plot else (20,15)
     _, axes = plt.subplots(num_plots, 1, figsize=fig_size, sharex=combined_plot)
+    ax_list = [axes] if combined_plot else list(axes)
 
-    for j in range(num_plots):
+    # ground truth: combined_plot only plots it once (num_plots == 1), separate plots once per subplot
+    for j, ax in enumerate(ax_list):
         for i in range(num_dim):
-            if combined_plot:
-                axes.plot(time, gt_values[:, i], "--", label=gt_label, color=colors[j])
-            else:
-                axes[j].plot(time, gt_values[:, i], "--", label=gt_label, color=colors[j])
+            ax.plot(time, gt_values[:, i], "--", label=gt_label, color=colors[j])
 
-    if combined_plot:
-        for k, prediction in enumerate(pred_values):
-            for i in range(num_dim):
-                axes.plot(time, prediction[:, i], linestyle="-", label=f"{pred_labels[k]}", alpha=0.5, color=colors[k+1])
-    else:
-        for j in range(num_plots):
-            prediction = pred_values[j]
-            for i in range(num_dim):
-                axes[j].plot(time, prediction[:, i], linestyle="-", label=f"{pred_labels[j]}", alpha=0.5, color=colors[j+1])
+    for k, prediction in enumerate(pred_values):
+        ax = ax_list[0] if combined_plot else ax_list[k]
+        for i in range(num_dim):
+            ax.plot(time, prediction[:, i], linestyle="-", label=f"{pred_labels[k]}", alpha=0.5, color=colors[k+1])
 
-    if combined_plot:
-        axes.set_xlabel("Time [s]")
-        axes.set_ylabel(ylabel)
-        axes.set_title(title)
-        axes.grid(True)
-        if time_window is not None: axes.set_xlim(time_window)
-        if show_legend: axes.legend()
-    else:
-        for j in range(num_plots):
-            axes[j].set_xlabel("Time [s]")
-            axes[j].set_ylabel(ylabel)
-            axes[j].set_title(title)
-            axes[j].grid(True)
-            if time_window is not None: axes[j].set_xlim(time_window)
-            if show_legend: axes[j].legend()
-    
-    if output_folder is not None: 
+    for ax in ax_list:
+        ax.set_xlabel("Time [s]")
+        ax.set_ylabel(ylabel)
+        ax.set_title(title)
+        ax.grid(True)
+        if time_window is not None: ax.set_xlim(time_window)
+        if show_legend: ax.legend()
+
+    if output_folder is not None:
         os.makedirs(output_folder, exist_ok=True)
         for file_type in file_types:
             plt.savefig(f"{output_folder}/{file_name}.{file_type}", bbox_inches='tight')
 
-    if seperate_legend: 
-        legend = axes.legend()
+    if seperate_legend:
+        legend = ax_list[0].legend()
         fig_leg = plt.figure(figsize=(2,2))
-        fig_leg.legend(*axes.get_legend_handles_labels(), loc="center")
+        fig_leg.legend(*ax_list[0].get_legend_handles_labels(), loc="center")
         fig_leg.savefig("legend.png", bbox_inches="tight")
         plt.close(fig_leg)
 
