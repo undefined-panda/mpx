@@ -112,5 +112,31 @@ def estimate_contact_forces(joint_torque, contact_state, legs_order, lin_jacobia
         f_leg = -jnp.linalg.pinv(J_lin.T) @ tau_leg
         c_force = contact_state[i] * f_leg
         contact_forces.append(c_force)
-    
+
     return jnp.array(contact_forces)
+
+@jax.jit
+def estimate_contact_forces_jax(joint_torque, contact_state, lin_jacobian_w_stack) -> jax.Array:
+    """jax.jit + jax.vmap equivalent of estimate_contact_forces.
+
+    estimate_contact_forces indexes into lin_jacobian_w (a LegsAttr) by leg name, which
+    is not jit-friendly. This instead takes the per-leg 3x3 linear Jacobian blocks
+    already extracted and stacked into a plain array, so the per-leg computation can be
+    vectorized with vmap instead of a Python for loop.
+
+    Args:
+        joint_torque (jax.Array): joint torque, shape (12,)
+        contact_state (jax.Array): contact state, shape (4,)
+        lin_jacobian_w_stack (jax.Array): per-leg 3x3 linear Jacobian block (own joints
+            only) in world frame, shape (4, 3, 3)
+
+    Returns:
+        jax.Array: estimated contact force per leg, shape (4, 3)
+    """
+
+    tau = joint_torque.reshape(4, 3)
+
+    def per_leg(J_lin, tau_leg, c_i):
+        return c_i * (-jnp.linalg.pinv(J_lin.T) @ tau_leg)
+
+    return jax.vmap(per_leg)(lin_jacobian_w_stack, tau, contact_state)

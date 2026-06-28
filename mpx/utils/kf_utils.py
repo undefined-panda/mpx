@@ -1,4 +1,6 @@
 import numpy as np
+import jax
+import jax.numpy as jnp
 
 def load_custom_dataset(dataset_path, sim_num):
     dataset = np.load(dataset_path)
@@ -112,3 +114,102 @@ def rot_to_quat(orient):
                          (R[0,2] + R[2,0]) / s,
                          (R[1,2] + R[2,1]) / s,
                          0.25 * s])
+
+
+# ---------------------------------------------------------------------------
+# JAX equivalents, for switching the estimation pipeline to a JAX backend.
+# Pure math, so each one is a direct jax.jit-compiled counterpart of the numpy
+# version above; branches that use a Python if/else above use jnp.where/jax.lax.cond
+# here instead, since the branch condition is a traced value under jit.
+# ---------------------------------------------------------------------------
+
+@jax.jit
+def skew_jax(w):
+    w1, w2, w3 = w
+    return jnp.array([[0, -w3, w2],
+                       [w3, 0, -w1],
+                       [-w2, w1, 0]])
+
+@jax.jit
+def skew_inverse_jax(S):
+    return jnp.array([S[2,1], S[0,2], S[1,0]])
+
+@jax.jit
+def matrix_exp_jax(w, dt):
+    w_scaled = dt * w
+    theta = jnp.linalg.norm(w_scaled)
+    w_skew = skew_jax(w_scaled)
+
+    safe_theta = jnp.where(theta < 1e-6, 1.0, theta)
+    exp_general = (jnp.eye(3)
+                   + (jnp.sin(safe_theta) / safe_theta) * w_skew
+                   + ((1 - jnp.cos(safe_theta)) / safe_theta**2) * (w_skew @ w_skew))
+    exp_small = jnp.eye(3) + w_skew
+
+    return jnp.where(theta < 1e-6, exp_small, exp_general)
+
+@jax.jit
+def matrix_log_jax(R):
+    theta = jnp.arccos(jnp.clip((jnp.trace(R) - 1) / 2, -1, 1))
+    safe_theta = jnp.where(theta < 1e-6, 1.0, theta)
+
+    log_general = skew_inverse_jax((safe_theta / (2 * jnp.sin(safe_theta))) * (R - R.T))
+    log_small = skew_inverse_jax(R - R.T) * 0.5
+
+    return jnp.where(theta < 1e-6, log_small, log_general)
+
+@jax.jit
+def quat_to_rot_jax(orient):
+    """JAX equivalent of quat_to_rot."""
+
+    w, x, y, z = orient
+    return jnp.array([
+        [2*(w**2 + x**2) - 1, 2*(x*y - w*z)      , 2*(w*y + x*z)      ],
+        [2*(x*y + w*z)      , 2*(w**2 + y**2) - 1, 2*(y*z - w*x)      ],
+        [2*(x*z - w*y)      , 2*(y*z + w*x)      , 2*(w**2 + z**2) - 1]
+    ])
+
+@jax.jit
+def rot_to_quat_jax(orient):
+    """JAX equivalent of rot_to_quat (Shepherd's method), using jax.lax.cond for the
+    data-dependent branches instead of Python if/elif."""
+
+    R = orient
+    trace = R[0,0] + R[1,1] + R[2,2]
+
+    def case0(_):
+        s = 0.5 / jnp.sqrt(trace + 1.0)
+        return jnp.array([0.25 / s,
+                          (R[2,1] - R[1,2]) * s,
+                          (R[0,2] - R[2,0]) * s,
+                          (R[1,0] - R[0,1]) * s])
+
+    def case1(_):
+        s = 2.0 * jnp.sqrt(1.0 + R[0,0] - R[1,1] - R[2,2])
+        return jnp.array([(R[2,1] - R[1,2]) / s,
+                          0.25 * s,
+                          (R[0,1] + R[1,0]) / s,
+                          (R[0,2] + R[2,0]) / s])
+
+    def case2(_):
+        s = 2.0 * jnp.sqrt(1.0 + R[1,1] - R[0,0] - R[2,2])
+        return jnp.array([(R[0,2] - R[2,0]) / s,
+                          (R[0,1] + R[1,0]) / s,
+                          0.25 * s,
+                          (R[1,2] + R[2,1]) / s])
+
+    def case3(_):
+        s = 2.0 * jnp.sqrt(1.0 + R[2,2] - R[0,0] - R[1,1])
+        return jnp.array([(R[1,0] - R[0,1]) / s,
+                          (R[0,2] + R[2,0]) / s,
+                          (R[1,2] + R[2,1]) / s,
+                          0.25 * s])
+
+    return jax.lax.cond(
+        trace > 0, case0,
+        lambda _: jax.lax.cond(
+            R[0,0] > R[1,1],
+            lambda _: jax.lax.cond(R[0,0] > R[2,2], case1, case3, None),
+            lambda _: jax.lax.cond(R[1,1] > R[2,2], case2, case3, None),
+            None),
+        None)
