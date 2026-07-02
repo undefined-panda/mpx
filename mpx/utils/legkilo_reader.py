@@ -3,6 +3,7 @@ from tqdm import tqdm
 import numpy as np
 from pathlib import Path
 import os
+from mpx.utils.kf_utils import quat_to_rot
 
 class LegKILOReader():
     """Class to read ROS .bag file and ground truth .txt-file from Leg KILO dataset (https://github.com/ouguangjun/legkilo-dataset).
@@ -129,7 +130,7 @@ class LegKILOReader():
 
                 # odom frame
                 R = quat_to_rot(base_orient)
-                vel_o = R @ vel_b
+                vel_o = np.array(R) @ vel_b
                 data["base_vel_o"].append(np.array(vel_o, dtype=float))
 
                 data["joint_pos"].append([msg.motorState[i].q for i in range(12)])
@@ -213,22 +214,3 @@ class LegKILOReader():
         self.gt_timestamps = gt_data[:, 0]
         self.gt_positions = gt_data[:, 1:4]   # x, y, z
         self.gt_quaternions = gt_data[:, 4:8]  # qx, qy, qz, qw
-
-def quat_to_rot(orient) -> np.ndarray:
-    """Convert quaternion to rotation matrix (source: https://cookierobotics.com/080/).
-
-    Args:
-        orient (np.ndarray | list): quaternion in [w, x, y, z] format
-
-    Returns:
-        np.ndarray: corresponding rotation matrix
-    """
-
-    w, x, y, z = orient
-    R = np.array([
-        [2*(w**2 + x**2) - 1, 2*(x*y - w*z)      , 2*(w*y + x*z)      ],
-        [2*(x*y + w*z)      , 2*(w**2 + y**2) - 1, 2*(y*z - w*x)      ],
-        [2*(x*z - w*y)      , 2*(y*z + w*x)      , 2*(w**2 + z**2) - 1]
-    ])
-    
-    return R
