@@ -44,9 +44,13 @@ class BatchedMPCControllerWrapper:
         data = mujoco.MjData(model)
         mujoco.mj_fwdPosition(model, data)
         robot_mass = data.qM[0]
-        # Nominal base-link mass, used as the default MPC dynamics belief unless
-        # a different (e.g. randomized/estimated) base mass is passed to run().
+        # Nominal base-link spatial inertia, used as the default MPC dynamics
+        # belief unless a different (e.g. randomized/estimated) base mass/inertia
+        # is passed to run().
         self.nominal_base_mass = float(model.body_mass[1])
+        self.nominal_base_inertia_diag = model.body_inertia[1].copy()
+        self.nominal_base_iquat = model.body_iquat[1].copy()
+        self.nominal_base_ipos = model.body_ipos[1].copy()
         mjx_model = mjx.put_model(model)
         self.config = config
         self.mpc_frequency = config.mpc_frequency
@@ -115,7 +119,7 @@ class BatchedMPCControllerWrapper:
             grf = jnp.zeros(3*self.config.n_contact)
         )
     
-    def run(self,data, x0, input, base_mass=None):
+    def run(self,data, x0, input, base_mass=None, base_inertia_diag=None, base_iquat=None, base_ipos=None):
         """
         Runs one MPC update using the current state, input, and foot positions.
 
@@ -127,6 +131,12 @@ class BatchedMPCControllerWrapper:
             foot_op: Flattened current foot positions vector.
             base_mass: Base mass [kg] for the internal dynamics model to use this
                 solve. Defaults to the nominal base mass from config.model_path.
+            base_inertia_diag: Base principal inertia moments (3,) [kg m^2] for the
+                internal dynamics model. Defaults to the nominal value.
+            base_iquat: Base principal-axes orientation quaternion (4,) for the
+                internal dynamics model. Defaults to the nominal value.
+            base_ipos: Base CoM offset (3,) [m] for the internal dynamics model.
+                Defaults to the nominal value.
 
         Returns:
             A tuple (X, U, V) representing the computed state trajectory, control sequence,
@@ -134,6 +144,12 @@ class BatchedMPCControllerWrapper:
         """
         if base_mass is None:
             base_mass = self.nominal_base_mass
+        if base_inertia_diag is None:
+            base_inertia_diag = self.nominal_base_inertia_diag
+        if base_iquat is None:
+            base_iquat = self.nominal_base_iquat
+        if base_ipos is None:
+            base_ipos = self.nominal_base_ipos
 
         # Update the timer state for the gait reference.
         _ , contact_time = mpc_utils.timer_run(data.duty_factor,data.step_freq,data.contact_time,1/self.mpc_frequency)
@@ -152,6 +168,9 @@ class BatchedMPCControllerWrapper:
             liftoff = data.liftoff,
             contact = contact,
             base_mass = base_mass,
+            base_inertia_diag = base_inertia_diag,
+            base_iquat = base_iquat,
+            base_ipos = base_ipos,
         )
 
         # Execute the MPC optimization (work function).
@@ -216,9 +235,13 @@ class MPCControllerWrapper:
         self.data = mujoco.MjData(self.model)
         mujoco.mj_fwdPosition(self.model, self.data)
         robot_mass = self.data.qM[0]
-        # Nominal base-link mass, used as the default MPC dynamics belief unless
-        # a different (e.g. randomized/estimated) base mass is passed to run().
+        # Nominal base-link spatial inertia, used as the default MPC dynamics
+        # belief unless a different (e.g. randomized/estimated) base mass/inertia
+        # is passed to run().
         self.nominal_base_mass = float(self.model.body_mass[1])
+        self.nominal_base_inertia_diag = self.model.body_inertia[1].copy()
+        self.nominal_base_iquat = self.model.body_iquat[1].copy()
+        self.nominal_base_ipos = self.model.body_ipos[1].copy()
         mjx_model = mjx.put_model(self.model)
         self.config = config
         self.mpc_frequency = config.mpc_frequency
@@ -305,7 +328,7 @@ class MPCControllerWrapper:
         self.collision = [0,0,0,0]
         self.collision_cycle = np.zeros(config.n_contact)
 
-    def run(self, qpos, qvel, input, contact, base_mass=None):
+    def run(self, qpos, qvel, input, contact, base_mass=None, base_inertia_diag=None, base_iquat=None, base_ipos=None):
         """
         Runs one MPC update using the current state positions, velocities, input, and contact information.
 
@@ -316,12 +339,24 @@ class MPCControllerWrapper:
             contact: Contact state vector.
             base_mass: Base mass [kg] for the internal dynamics model to use this
                 solve. Defaults to the nominal base mass from config.model_path.
+            base_inertia_diag: Base principal inertia moments (3,) [kg m^2] for the
+                internal dynamics model. Defaults to the nominal value.
+            base_iquat: Base principal-axes orientation quaternion (4,) for the
+                internal dynamics model. Defaults to the nominal value.
+            base_ipos: Base CoM offset (3,) [m] for the internal dynamics model.
+                Defaults to the nominal value.
 
         Returns:
             A tuple (tau, q, dq) representing the computed joint torques, joint positions, and joint velocities.
         """
         if base_mass is None:
             base_mass = self.nominal_base_mass
+        if base_inertia_diag is None:
+            base_inertia_diag = self.nominal_base_inertia_diag
+        if base_iquat is None:
+            base_iquat = self.nominal_base_iquat
+        if base_ipos is None:
+            base_ipos = self.nominal_base_ipos
 
         self.contact = contact.copy()
         #get forward kinematics for foot position
@@ -356,7 +391,10 @@ class MPCControllerWrapper:
             liftoff = self.liftoff,
             contact = contact,
             clearence_speed = self.clearence_speed,
-            base_mass = base_mass
+            base_mass = base_mass,
+            base_inertia_diag = base_inertia_diag,
+            base_iquat = base_iquat,
+            base_ipos = base_ipos
         )
 
         # Execute the MPC optimization.

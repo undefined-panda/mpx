@@ -1,3 +1,4 @@
+import copy
 import jax.numpy as jnp
 import jax
 import mujoco
@@ -53,12 +54,96 @@ env = QuadrupedEnv(robot=robot_name,
                    )
 obs = env.reset(random=False)
 
-# BASE MASS RANDOMIZATION: the floating base is always the first body after the
-# world in these MJCF models (id 1, e.g. "trunk" for aliengo, "base" for go2).
+# BASE MASS/INERTIA RANDOMIZATION: the floating base is always the first body
+# after the world in these MJCF models (id 1, e.g. "trunk" for aliengo, "base"
+# for go2).
 BASE_BODY_ID = 1
 nominal_base_mass = env.mjModel.body_mass[BASE_BODY_ID].copy()
-nominal_base_inertia = env.mjModel.body_inertia[BASE_BODY_ID].copy()
-base_mass_offset_range = (-3.0, 3.0)  # sampled base mass = nominal_mass + U(lo, hi) [kg]
+nominal_base_inertia = env.mjModel.body_inertia[BASE_BODY_ID].copy()  # principal moments (3,)
+nominal_base_iquat = env.mjModel.body_iquat[BASE_BODY_ID].copy()     # principal-axes orientation
+nominal_base_ipos = env.mjModel.body_ipos[BASE_BODY_ID].copy()       # CoM offset in the body frame
+base_mass_offset_range = (-3.0, 3.0)             # sampled base mass = nominal_mass + U(lo, hi) [kg]
+inertia_density_offset_range = (-0.02, 0.02)     # offset for the 3 inertia "density" terms [kg m^2]
+rotation_offset_range = (-0.1, 0.1)              # small rotation-vector offset for principal axes [rad]
+ipos_offset_range = (-0.02, 0.02)                # offset for the base CoM position [m]
+
+# ADDED BY ME: scratch model/data holding the *nominal* (unrandomized) spatial
+# inertia, captured once here before any per-run randomization is ever applied.
+# Reused for compute_tau_components across every run/step (never the live
+# env.mjModel/env.mjData), so we can log the nominal-model torque decomposition
+# alongside the one for the randomized model actually driving the simulation.
+nominal_dyn_model = copy.deepcopy(env.mjModel)
+nominal_dyn_data = copy.deepcopy(env.mjData)
+
+# Physically-consistent-by-construction inertia parametrization, ported to numpy
+# from the "PrincipalTriangular" reparametrization in get_tri_dyn_params()
+# (felan/jax/floating_base/mjx_dnea.py). Instead of perturbing principal moments
+# directly and clipping to satisfy the triangle inequality after the fact, it
+# reparametrizes them as J0=d1+d2, J1=d0+d2, J2=d0+d1 for non-negative "density"
+# terms d0,d1,d2 -- any non-negative d's yield a J that is automatically positive
+# and satisfies the triangle inequality, so no post-hoc correction is needed.
+
+def expmap_to_quat(rotvec):
+    """Convert a 3D rotation vector (exponential map) to a unit quaternion (w,x,y,z)."""
+    theta = np.linalg.norm(rotvec)
+    if theta < 1e-8:
+        return np.array([1.0, 0.0, 0.0, 0.0])
+    axis = rotvec / theta
+    half = 0.5 * theta
+    return np.concatenate([[np.cos(half)], axis * np.sin(half)])
+
+def quat_mul(q1, q2):
+    """Hamilton product of two (w, x, y, z) quaternions."""
+    w1, x1, y1, z1 = q1
+    w2, x2, y2, z2 = q2
+    return np.array([
+        w1*w2 - x1*x2 - y1*y2 - z1*z2,
+        w1*x2 + x1*w2 + y1*z2 - z1*y2,
+        w1*y2 - x1*z2 + y1*w2 + z1*x2,
+        w1*z2 + x1*y2 - y1*x2 + z1*w2,
+    ])
+
+def principal_inertia_to_densities(inertia_diag):
+    """Invert J0=d1+d2, J1=d0+d2, J2=d0+d1 to recover the nominal densities."""
+    J0, J1, J2 = inertia_diag
+    s = 0.5 * (J0 + J1 + J2)
+    return np.array([s - J0, s - J1, s - J2])  # d0, d1, d2
+
+def densities_to_principal_inertia(d):
+    d0, d1, d2 = d
+    return np.array([d1 + d2, d0 + d2, d0 + d1])  # J0, J1, J2
+
+def sample_tri_dyn_params(nominal_mass, nominal_inertia_diag, nominal_iquat, nominal_ipos, mass_offset_range,
+                           inertia_density_offset_range, rotation_offset_range, ipos_offset_range, rng,
+                           density_epsilon=1e-6):
+    """
+    Physically-consistent-by-construction sampling of the base's spatial inertia:
+    - mass: additive offset around the nominal mass.
+    - rotational inertia: perturbed in "density" space; any non-negative densities
+      give principal moments that automatically satisfy positivity and the
+      triangle inequality, so no eigendecomposition/clipping is needed.
+    - principal-axes orientation: nominal orientation composed with a small
+      random rotation (as a unit quaternion via the exponential map), which is a
+      valid quaternion by construction.
+    - CoM offset: additive offset around the nominal position (any 3-vector is a
+      valid CoM location, so no extra constraint is needed).
+    Returns (base_mass [kg], base_inertia_diag (3,) [kg m^2], base_iquat (4,),
+    base_ipos (3,) [m]).
+    """
+    new_mass = nominal_mass + rng.uniform(*mass_offset_range)
+
+    d_nominal = principal_inertia_to_densities(nominal_inertia_diag)
+    d_offset = rng.uniform(*inertia_density_offset_range, size=3)
+    d_new = np.maximum(d_nominal + d_offset, density_epsilon)
+    new_inertia_diag = densities_to_principal_inertia(d_new)
+
+    rotvec = rng.uniform(*rotation_offset_range, size=3)
+    new_iquat = quat_mul(nominal_iquat, expmap_to_quat(rotvec))
+    new_iquat /= np.linalg.norm(new_iquat)
+
+    new_ipos = nominal_ipos + rng.uniform(*ipos_offset_range, size=3)
+
+    return new_mass, new_inertia_diag, new_iquat, new_ipos
 
 def sample_base_mass(env, nominal_mass, nominal_inertia, mass_offset_range, rng):
     """
@@ -73,6 +158,28 @@ def sample_base_mass(env, nominal_mass, nominal_inertia, mass_offset_range, rng)
     env.mjModel.body_mass[BASE_BODY_ID] = new_mass
     env.mjModel.body_inertia[BASE_BODY_ID] = nominal_inertia * scale
     return float(env.mjModel.body_mass[BASE_BODY_ID])
+
+def sample_base_spatial_inertia(env, nominal_mass, nominal_inertia, nominal_iquat, nominal_ipos, mass_offset_range,
+                                 inertia_density_offset_range, rotation_offset_range, ipos_offset_range, rng):
+    """
+    Randomize the floating base's whole spatial inertia (mass + rotational
+    inertia tensor + principal-axes orientation + CoM offset) using the
+    physically-consistent-by-construction `sample_tri_dyn_params` parametrization,
+    and applies it to the true simulated model.
+    Returns (base_mass [kg], base_inertia_diag (3,) [kg m^2], base_iquat (4,),
+    base_ipos (3,) [m]) so the sampled spatial inertia can be handed to the MPC
+    as well, not just used to mutate the true simulated physics.
+    """
+    new_mass, new_inertia_diag, new_iquat, new_ipos = sample_tri_dyn_params(
+        nominal_mass, nominal_inertia, nominal_iquat, nominal_ipos, mass_offset_range,
+        inertia_density_offset_range, rotation_offset_range, ipos_offset_range, rng)
+
+    env.mjModel.body_mass[BASE_BODY_ID] = new_mass
+    env.mjModel.body_inertia[BASE_BODY_ID] = new_inertia_diag
+    env.mjModel.body_iquat[BASE_BODY_ID] = new_iquat
+    env.mjModel.body_ipos[BASE_BODY_ID] = new_ipos
+
+    return float(env.mjModel.body_mass[BASE_BODY_ID]), new_inertia_diag, new_iquat, new_ipos
 
 # Define the MPC wrapper
 mpc = mpc_wrapper.MPCControllerWrapper(config)
@@ -96,8 +203,46 @@ mpc.reset(env.mjData.qpos.copy(),env.mjData.qvel.copy())
 dataset_path = Path.cwd() / "custom_datasets"
 dataset_path.mkdir(exist_ok=True)
 
+# ADDED BY ME: decompose the equations of motion M(q)qdd + C(q,qd)qd + g(q) = tau
+def compute_tau_components(model, data, qpos, qvel, qacc):
+    """
+    Decompose the generalized-coordinate equations of motion at the given
+    qpos/qvel/qacc into:
+      tau_m = M(q) @ qacc          (inertial term)
+      tau_g = g(q)                 (gravity term, isolated with qvel = 0)
+      tau_c = qfrc_bias - tau_g    (Coriolis/centrifugal term)
+    mj_rne(model, data, flg_acc=0, result) computes M(q)*qacc + C(q,qd) with the
+    inertial term removed, i.e. exactly qfrc_bias == C(q,qd)*qd + g(q); zeroing
+    qvel before calling it isolates gravity alone (the velocity-product term
+    vanishes), so no separate gravity-only model/solver is needed.
+
+    `model`/`data` must be a scratch copy created once per simulation run at
+    reset (see dyn_model/dyn_data below) -- not the live env.mjModel/env.mjData
+    -- so dataset logging never perturbs the live simulation. Each call only
+    overwrites qpos/qvel on that scratch `data` and re-runs mj_forward, which is
+    far cheaper than a full MjData deepcopy every timestep.
+    Returns (tau_m, tau_c, tau_g), each shape (nv,).
+    """
+    data.qpos[:] = qpos
+    data.qvel[:] = qvel
+    mujoco.mj_forward(model, data)  # refresh qM/qfrc_bias/kinematics for this state
+
+    nv = model.nv
+    M = np.zeros((nv, nv))
+    mujoco.mj_fullM(model, M, data.qM)
+    tau_m = M @ qacc
+
+    tau_bias = data.qfrc_bias.copy()  # C(q,qd)*qd + g(q)
+
+    data.qvel[:] = 0
+    tau_g = np.zeros(nv)
+    mujoco.mj_rne(model, data, 0, tau_g)
+
+    tau_c = tau_bias - tau_g
+    return tau_m, tau_c, tau_g
+
 # add values to dataset
-def log_values(dataset, sim_num, dt, t, qpos, qvel, qacc, tau_total, contact_states, contact_pos, contact_forces, q, base_mass):
+def log_values(dataset, sim_num, dt, t, qpos, qvel, qacc, tau_total, contact_states, contact_pos, contact_forces, q, base_mass, model, data):
     """
     Docstring for log_values
 
@@ -110,7 +255,21 @@ def log_values(dataset, sim_num, dt, t, qpos, qvel, qacc, tau_total, contact_sta
     :param contact_forces: 2d-array with array for each contact (here: 4)
     :param q: desired joint position/angle
     :param base_mass: sampled floating-base mass for this simulation run [kg]
+    :param model: scratch MjModel (randomized spatial inertia, matches the
+        simulation/control model) for compute_tau_components -- not the live
+        env.mjModel
+    :param data: scratch MjData paired with `model` -- not the live env.mjData
     """
+    tau_m, tau_c, tau_g = compute_tau_components(model, data, qpos, qvel, qacc)
+    # ADDED BY ME: same decomposition but with the nominal (unrandomized) spatial
+    # inertia, so the dataset also has the dynamics as the nominal robot model
+    # would predict them (for comparison against the true/simulated model above).
+    tau_m_nom, tau_c_nom, tau_g_nom = compute_tau_components(nominal_dyn_model, nominal_dyn_data, qpos, qvel, qacc)
+    # ADDED BY ME: real (randomized/simulated) minus nominal-model prediction --
+    # the mismatch the nominal-model MPC/controller is implicitly compensating for.
+    diff_tau_m_nom = tau_m - tau_m_nom
+    diff_tau_c_nom = tau_c - tau_c_nom
+    diff_tau_g_nom = tau_g - tau_g_nom
 
     dataset["dt"][sim_num].append(dt)
     dataset["time"][sim_num].append(t)
@@ -128,6 +287,17 @@ def log_values(dataset, sim_num, dt, t, qpos, qvel, qacc, tau_total, contact_sta
     dataset["joint_vel"][sim_num].append(qvel[6:].copy())
     dataset["joint_acc"][sim_num].append(qacc[6:].copy())
     dataset["joint_torque"][sim_num].append(tau_total.copy())
+
+    # --- Dynamics decomposition (full generalized coords: base 6 DOF + joints) ---
+    dataset["tau_m"][sim_num].append(tau_m.copy())
+    dataset["tau_c"][sim_num].append(tau_c.copy())
+    dataset["tau_g"][sim_num].append(tau_g.copy())
+    dataset["tau_m_nom"][sim_num].append(tau_m_nom.copy())
+    dataset["tau_c_nom"][sim_num].append(tau_c_nom.copy())
+    dataset["tau_g_nom"][sim_num].append(tau_g_nom.copy())
+    dataset["diff_tau_m_nom"][sim_num].append(diff_tau_m_nom.copy())
+    dataset["diff_tau_c_nom"][sim_num].append(diff_tau_c_nom.copy())
+    dataset["diff_tau_g_nom"][sim_num].append(diff_tau_g_nom.copy())
 
     # --- Contact ---
     dataset["contact_states"][sim_num].append(contact_states.copy())
@@ -164,6 +334,15 @@ custom_dataset = {"dt":[],
                   "joint_vel":[],
                   "joint_acc":[],
                   "joint_torque":[],
+                  "tau_m":[],
+                  "tau_c":[],
+                  "tau_g":[],
+                  "tau_m_nom":[],
+                  "tau_c_nom":[],
+                  "tau_g_nom":[],
+                  "diff_tau_m_nom":[],
+                  "diff_tau_c_nom":[],
+                  "diff_tau_g_nom":[],
                   "contact_states":[],
                   "contact_pos":[],
                   "contact_forces":[],
@@ -188,9 +367,18 @@ for sim_num in range(num_simulations):
 
     env.reset(qpos=q_init, qvel=dq_init, random=False)
 
-    # ADDED BY ME: sample a new base mass for this simulation run
-    base_mass = sample_base_mass(env, nominal_base_mass, nominal_base_inertia, base_mass_offset_range, rng)
-    print(f"Sampled base mass: {base_mass:.3f} kg")
+    # ADDED BY ME: sample a new base mass + spatial inertia for this simulation run
+    base_mass, base_inertia_diag, base_iquat, base_ipos = sample_base_spatial_inertia(
+        env, nominal_base_mass, nominal_base_inertia, nominal_base_iquat, nominal_base_ipos,
+        base_mass_offset_range, inertia_density_offset_range,
+        rotation_offset_range, ipos_offset_range, rng)
+    print(f"Sampled base mass: {base_mass:.3f} kg base_inertia_diag: {base_inertia_diag} base_iquat: {base_iquat} base_ipos: {base_ipos}")
+
+    # ADDED BY ME: scratch model/data for compute_tau_components, created once per
+    # simulation run (after the spatial-inertia randomization above, so they
+    # reflect the sampled mass/inertia) -- never the live env.mjModel/env.mjData.
+    dyn_model = copy.deepcopy(env.mjModel)
+    dyn_data = copy.deepcopy(env.mjData)
 
     mpc.reset(q_init, dq_init)
     tau = jnp.zeros(config.n_joints)
@@ -247,12 +435,14 @@ for sim_num in range(num_simulations):
                     state, reward, is_terminated, is_truncated, info = env.step(action=tau + tau_fb)
 
                     t = env.simulation_time
-                    log_values(custom_dataset, sim_num, dt, t, qpos, qvel, qacc, tau+tau_fb, contact_states, contact_pos, contact_forces, q, base_mass) # ADDED BY ME: add values to dataset
+                    log_values(custom_dataset, sim_num, dt, t, qpos, qvel, qacc, tau+tau_fb, contact_states, contact_pos, contact_forces, q, base_mass, dyn_model, dyn_data) # ADDED BY ME: add values to dataset
 
                     counter += 1
 
             start = timer()
-            tau, q, dq = mpc.run(qpos,qvel,input,contact_states,base_mass=base_mass)
+            tau, q, dq = mpc.run(qpos,qvel,input,contact_states,base_mass=base_mass,
+                                  base_inertia_diag=base_inertia_diag,base_iquat=base_iquat,
+                                  base_ipos=base_ipos)
             stop = timer()
             #print("Time taken for MPC: ", stop-start)
 
@@ -268,7 +458,7 @@ for sim_num in range(num_simulations):
         state, reward, is_terminated, is_truncated, info = env.step(action= tau + tau_fb)
 
         t = env.simulation_time
-        log_values(custom_dataset, sim_num, dt, t, qpos, qvel, qacc, tau+tau_fb, contact_states, contact_pos, contact_forces, q, base_mass) # ADDED BY ME: add values to dataset
+        log_values(custom_dataset, sim_num, dt, t, qpos, qvel, qacc, tau+tau_fb, contact_states, contact_pos, contact_forces, q, base_mass, dyn_model, dyn_data) # ADDED BY ME: add values to dataset
 
         # time.sleep(0.1)
         counter += 1

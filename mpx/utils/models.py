@@ -56,18 +56,28 @@ def quadruped_wb_dynamics(model, mjx_model, contact_id, body_id, n_joints, dt, x
         u (jnp.ndarray): Control input vector (torques for the joints).
         t (int): Current time step index.
         parameter (jnp.ndarray): Per-timestep contact flags (columns 0:4) followed
-            by the base mass to use for this MPC solve (column 4, broadcast to
-            every row by the reference generator).
+            by the base spatial inertia to use for this MPC solve, broadcast to
+            every row by the reference generator: base mass (column 4), base
+            principal inertia moments (columns 5:8), base principal-axes
+            orientation quaternion (columns 8:12), base CoM offset (columns 12:15).
 
     Returns:
         jnp.ndarray: The updated state vector after applying dynamics and contact forces.
     """
     # Correct the internal dynamics model for the (possibly randomized/estimated)
-    # base mass. It arrives through `parameter`, a plain runtime array, instead of
-    # being bound via functools.partial, so it can change every MPC call without
-    # forcing a recompile of the jitted solver.
+    # base mass/spatial inertia. These arrive through `parameter`, a plain runtime
+    # array, instead of being bound via functools.partial, so they can change
+    # every MPC call without forcing a recompile of the jitted solver.
     base_mass = parameter[t, 4]
-    mjx_model = mjx_model.replace(body_mass=mjx_model.body_mass.at[_BASE_BODY_ID].set(base_mass))
+    base_inertia_diag = parameter[t, 5:8]
+    base_iquat = parameter[t, 8:12]
+    base_ipos = parameter[t, 12:15]
+    mjx_model = mjx_model.replace(
+        body_mass=mjx_model.body_mass.at[_BASE_BODY_ID].set(base_mass),
+        body_inertia=mjx_model.body_inertia.at[_BASE_BODY_ID].set(base_inertia_diag),
+        body_iquat=mjx_model.body_iquat.at[_BASE_BODY_ID].set(base_iquat),
+        body_ipos=mjx_model.body_ipos.at[_BASE_BODY_ID].set(base_ipos),
+    )
 
     # Create a new data object for the simulation
     mjx_data = mjx.make_data(model)
