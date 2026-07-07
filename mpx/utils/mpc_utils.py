@@ -36,7 +36,7 @@ def terrain_orientation(liftoff_pos,Ryaw):
     return jnp.roll(quat,1)
 
 @partial(jax.jit, static_argnums=(0,1,2,3,4,5))
-def reference_generator(use_terrain_estimator,N,dt,n_joints,n_contact,mass,foot0,q0,t_timer, x, foot, input, duty_factor, step_freq,step_height,liftoff,contact,clearence_speed):
+def reference_generator(use_terrain_estimator,N,dt,n_joints,n_contact,mass,foot0,q0,t_timer, x, foot, input, duty_factor, step_freq,step_height,liftoff,contact,clearence_speed,base_mass):
     p = x[:3]
     quat = x[3:7]
     # q = x[7:7+n_joints]
@@ -141,7 +141,12 @@ def reference_generator(use_terrain_estimator,N,dt,n_joints,n_contact,mass,foot0
     liftoff = liftoff.at[1::3].set(liftoff_y)
     liftoff = liftoff.at[2::3].set(liftoff_z)
 
-    return jnp.concatenate([p_ref, quat_ref, q_ref, dp_ref, omega_ref, foot_ref, contact_sequence,grf_ref], axis=1),jnp.concatenate([contact_sequence], axis=1), liftoff
+    # Base mass is threaded through `parameter` (a plain runtime array) rather than
+    # bound via functools.partial/static_argnums, so the dynamics model can pick up
+    # a new (e.g. randomized/estimated) base mass every MPC call without retracing.
+    base_mass_ref = jnp.full((N+1, 1), base_mass)
+
+    return jnp.concatenate([p_ref, quat_ref, q_ref, dp_ref, omega_ref, foot_ref, contact_sequence,grf_ref], axis=1),jnp.concatenate([contact_sequence, base_mass_ref], axis=1), liftoff
 
 @partial(jax.jit, static_argnums=(0,1,2,3))
 def reference_generator_srbd(use_terrain_estimator,N,dt,n_contact,mass,foot0,t_timer, x, foot, input, duty_factor, step_freq,step_height,liftoff,contact,clearence_speed):

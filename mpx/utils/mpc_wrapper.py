@@ -44,6 +44,9 @@ class BatchedMPCControllerWrapper:
         data = mujoco.MjData(model)
         mujoco.mj_fwdPosition(model, data)
         robot_mass = data.qM[0]
+        # Nominal base-link mass, used as the default MPC dynamics belief unless
+        # a different (e.g. randomized/estimated) base mass is passed to run().
+        self.nominal_base_mass = float(model.body_mass[1])
         mjx_model = mjx.put_model(model)
         self.config = config
         self.mpc_frequency = config.mpc_frequency
@@ -112,7 +115,7 @@ class BatchedMPCControllerWrapper:
             grf = jnp.zeros(3*self.config.n_contact)
         )
     
-    def run(self,data, x0, input):
+    def run(self,data, x0, input, base_mass=None):
         """
         Runs one MPC update using the current state, input, and foot positions.
 
@@ -122,11 +125,15 @@ class BatchedMPCControllerWrapper:
             x0: Current system state vector.
             input: Input
             foot_op: Flattened current foot positions vector.
+            base_mass: Base mass [kg] for the internal dynamics model to use this
+                solve. Defaults to the nominal base mass from config.model_path.
 
         Returns:
             A tuple (X, U, V) representing the computed state trajectory, control sequence,
             and auxiliary variable trajectory.
         """
+        if base_mass is None:
+            base_mass = self.nominal_base_mass
 
         # Update the timer state for the gait reference.
         _ , contact_time = mpc_utils.timer_run(data.duty_factor,data.step_freq,data.contact_time,1/self.mpc_frequency)
@@ -144,6 +151,7 @@ class BatchedMPCControllerWrapper:
             input = input,
             liftoff = data.liftoff,
             contact = contact,
+            base_mass = base_mass,
         )
 
         # Execute the MPC optimization (work function).
@@ -208,6 +216,9 @@ class MPCControllerWrapper:
         self.data = mujoco.MjData(self.model)
         mujoco.mj_fwdPosition(self.model, self.data)
         robot_mass = self.data.qM[0]
+        # Nominal base-link mass, used as the default MPC dynamics belief unless
+        # a different (e.g. randomized/estimated) base mass is passed to run().
+        self.nominal_base_mass = float(self.model.body_mass[1])
         mjx_model = mjx.put_model(self.model)
         self.config = config
         self.mpc_frequency = config.mpc_frequency
@@ -294,7 +305,7 @@ class MPCControllerWrapper:
         self.collision = [0,0,0,0]
         self.collision_cycle = np.zeros(config.n_contact)
 
-    def run(self, qpos, qvel, input, contact):
+    def run(self, qpos, qvel, input, contact, base_mass=None):
         """
         Runs one MPC update using the current state positions, velocities, input, and contact information.
 
@@ -303,10 +314,15 @@ class MPCControllerWrapper:
             qvel: Generalized velocity.
             input: Control input vector.
             contact: Contact state vector.
+            base_mass: Base mass [kg] for the internal dynamics model to use this
+                solve. Defaults to the nominal base mass from config.model_path.
 
         Returns:
             A tuple (tau, q, dq) representing the computed joint torques, joint positions, and joint velocities.
         """
+        if base_mass is None:
+            base_mass = self.nominal_base_mass
+
         self.contact = contact.copy()
         #get forward kinematics for foot position
 
@@ -339,7 +355,8 @@ class MPCControllerWrapper:
             input = input,
             liftoff = self.liftoff,
             contact = contact,
-            clearence_speed = self.clearence_speed
+            clearence_speed = self.clearence_speed,
+            base_mass = base_mass
         )
 
         # Execute the MPC optimization.

@@ -3,6 +3,11 @@ from jax import numpy as jnp
 from mujoco import mjx
 from mujoco.mjx._src import math
 
+# The floating base is always the first body after the world in these MJCF
+# models (id 1, e.g. "trunk" for aliengo/go2's "base"), so it can be indexed
+# without a robot-specific lookup.
+_BASE_BODY_ID = 1
+
 def quadruped_srbd_dynamics(mass, inertia,inertia_inv, dt, x, u, t,parameter):
     # Extract state variables
     p = x[:3]
@@ -50,11 +55,20 @@ def quadruped_wb_dynamics(model, mjx_model, contact_id, body_id, n_joints, dt, x
         x (jnp.ndarray): Current state vector [position, orientation, joint positions, velocities].
         u (jnp.ndarray): Control input vector (torques for the joints).
         t (int): Current time step index.
-        parameter (jnp.ndarray): Contact parameters for each time step.
+        parameter (jnp.ndarray): Per-timestep contact flags (columns 0:4) followed
+            by the base mass to use for this MPC solve (column 4, broadcast to
+            every row by the reference generator).
 
     Returns:
         jnp.ndarray: The updated state vector after applying dynamics and contact forces.
     """
+    # Correct the internal dynamics model for the (possibly randomized/estimated)
+    # base mass. It arrives through `parameter`, a plain runtime array, instead of
+    # being bound via functools.partial, so it can change every MPC call without
+    # forcing a recompile of the jitted solver.
+    base_mass = parameter[t, 4]
+    mjx_model = mjx_model.replace(body_mass=mjx_model.body_mass.at[_BASE_BODY_ID].set(base_mass))
+
     # Create a new data object for the simulation
     mjx_data = mjx.make_data(model)
     # Update the position and velocity in the data object
