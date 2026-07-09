@@ -51,12 +51,14 @@ def run_state_estimation(dt,
     c_force_measurement = []
     c_force_estimation = []
     c_state_estimation = []
+    leg_odom_vel = []
 
     kf = KF(dt=dt, Q_diag=Q, R_diag=R, est_mode=est_mode)
     leg_odom = LegOdom(model_name=model_name)
     gm_observer = GMContactObserver(dt, L1, L2, contact_thresholds)
     gm_observer.f_hat_history = []
-    single_force_val = contact_forces[0].shape == (4,)
+    if contact_forces is not None:
+        single_force_val = contact_forces[0].shape == (4,)
 
     # for single print
     base_acc_info = True
@@ -69,6 +71,7 @@ def run_state_estimation(dt,
         inertia_matrix = get_inertia_matrix(leg_odom.env)
         qfrc_bias = leg_odom.env.mjData.qfrc_bias.copy()
 
+        # estimate contact state if not given, either with thresholding singular contact force value or based on momentum
         if contact_states is None:
             if contact_forces is not None:
                 if single_force_val: # singular value for each foot (prob. z-component)
@@ -84,10 +87,10 @@ def run_state_estimation(dt,
                     c_state_info = False
                 J_w_stacked = np.vstack([J_w[leg][:, :] for leg in leg_odom.env.legs_order])
                 c_state, f_hat = gm_observer.step(vel=np.concatenate([kf.get_lin_vel(), base_ang_vel[i], joint_vel[i]]),
-                                                M=inertia_matrix,
-                                                joint_torque=joint_torque[i],
-                                                J=J_w_stacked,
-                                                qfrc_bias=qfrc_bias)
+                                                  M=inertia_matrix,
+                                                  joint_torque=joint_torque[i],
+                                                  J=J_w_stacked,
+                                                  qfrc_bias=qfrc_bias)
                 c_state_estimation.append(c_state)
                 gm_observer.f_hat_history.append(f_hat)
         else:
@@ -102,6 +105,7 @@ def run_state_estimation(dt,
                                       J_b=J_b,
                                       contact_state=c_state)
         
+        # estimate x,y,z-contact force
         if contact_forces is None or single_force_val:
             if c_force_info:
                 print("Estimating contact forces with joint torque")
@@ -114,6 +118,7 @@ def run_state_estimation(dt,
         else:
             c_force = contact_forces[i]
 
+        # estimate base accelaration based on floating base dynamics
         if base_acc is None:
             if base_acc_info:
                 print("Estimating base accelaration with dynamics")
@@ -153,6 +158,8 @@ def run_state_estimation(dt,
         ang_vel_update_sim.append(kf.get_ang_vel())
         if est_mode in [2,3,4]: c_force_update_sim.append(kf.get_contact_force())
 
+        leg_odom_vel.append(leg_odom.state.vel)
+
     result = {"pos_predict": np.array(pos_predict_sim),
               "vel_predict": np.array(vel_predict_sim),
               "ang_vel_predict": np.array(ang_vel_predict_sim),
@@ -164,7 +171,8 @@ def run_state_estimation(dt,
 
               "c_force_meas": np.array(c_force_measurement),
               "c_state_est": np.array(c_state_estimation),
-              "f_hat_history": np.array(gm_observer.f_hat_history)
+              "f_hat_history": np.array(gm_observer.f_hat_history),
+              "leg_odom_vel": np.array(leg_odom_vel)
               }
 
     return result

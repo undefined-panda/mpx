@@ -158,5 +158,5 @@ class GMContactObserver:
         f_filtered = self.alpha * self.f_hat_prev + (1 - self.alpha) * self.f_hat
         self.f_hat_prev = f_filtered
 
-        contact_state = f_filtered[2::3] > self.thresholds
+        contact_state = f_filtered[2::3] < self.thresholds
         return contact_state, f_filtered

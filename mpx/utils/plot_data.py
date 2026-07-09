@@ -172,11 +172,13 @@ def compare_estimation_plot(time,
     plt.tight_layout()
     plt.show()
 
-def estimation_plot(gt_value, est_value, label, start, end, title, calc_rmse=True):
+def estimation_plot(gt_value, est_value, label, title, start=None, end=None, calc_rmse=True):
     num_dim = gt_value[0].shape[0]
 
     fig, axes = plt.subplots(num_dim, 1, figsize=(15,20), constrained_layout=True)
     if calc_rmse: errors = rmse(gt_value, est_value)
+    if start is None: start = 0
+    if end is None: end = gt_value.shape[0]
 
     for i in range(num_dim):
         axes[i].plot(np.arange(end-start), est_value[start:end, i], label=f"{label} - kf", color="salmon")

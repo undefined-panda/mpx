@@ -12,18 +12,18 @@ class KF():
     - linear velocity
     - angular velocity
     - contact force (flattened, one 3-vector per foot)
-    - attitude error: a 3-dim error-state placeholder used only to couple the
-      orientation correction into the shared Kalman gain. It is reset to zero
-      after every update (standard error-state/multiplicative EKF pattern).
 
     Orientation itself is tracked separately as a 3x3 rotation matrix (`self.orient`)
     since it does not evolve linearly and cannot be part of a linear state vector.
+    - removed in current state
 
-    The control input is the joint acceleration (+ a constant bias term), used to
-    estimate the base acceleration inside the filter via the robot dynamics.
+    Depending on estimation mode, different A, B and H matrices are defined. The estimation 
+    modes determine which values are given and which need to be estimated.
+
+    The control input can be base accelaration or joint acceleration, used to estimate the 
+    base acceleration inside the filter via the robot dynamics.
 
     The measurements are:
-    - orientation coming from the IMU
     - linear velocity coming from leg odometry
     - angular velocity coming from the IMU
     - contact force
@@ -62,8 +62,14 @@ class KF():
         if est_mode in [2,3,4]:
             self.H = np.eye(21)[3:21, :]
 
-        self.Q = np.diag(Q_diag * np.ones(self.x.shape[0])) # process noise
-        self.R = np.diag(R_diag * np.ones(self.H.shape[0])) # measurement noise
+        # lowering a value means putting more trust into that part. Q = process noise, R = measurement noise
+        if est_mode == 1: # pos, lin and ang vel have each 3 values
+            self.Q = np.diag(np.repeat(Q_diag, 3))
+            self.R = np.diag(np.repeat(R_diag[1:], 3))
+        if est_mode in [2,3,4]: # contact force has 12
+            self.Q = np.diag(np.concatenate([np.repeat(Q_diag[:3], 3), np.repeat(Q_diag[3], 12)]))
+            self.R = np.diag(np.concatenate([np.repeat(R_diag[1:3], 3), np.repeat(R_diag[3], 12)]))
+
         self.P = self.Q.copy()  # error covariance
 
         self.filter_states = ["predict", "update"]
