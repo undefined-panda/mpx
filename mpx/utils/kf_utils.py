@@ -1,4 +1,5 @@
 import numpy as np
+import mujoco
 
 def load_custom_dataset(dataset_path, sim_num):
     dataset = np.load(dataset_path)
@@ -112,3 +113,22 @@ def rot_to_quat(orient):
                          (R[0,2] + R[2,0]) / s,
                          (R[1,2] + R[2,1]) / s,
                          0.25 * s])
+
+def rmse(gt_value, est_value):
+    return np.sqrt(np.mean((gt_value - est_value)**2, axis=0))
+
+def get_inertia_matrix(env):
+    M = np.zeros((env.mjModel.nv, env.mjModel.nv)) # shape == (18, 18)
+    mujoco.mj_fullM(env.mjModel, M, env.mjData.qM)
+
+    return M
+
+def get_jacobian(env, orient, joint_pos, joint_vel):
+    env.mjData.qpos[:] = np.concatenate([np.zeros(shape=(3,)), orient, joint_pos])
+    env.mjData.qvel[:] = np.concatenate([np.zeros(shape=(6,)), joint_vel])
+    mujoco.mj_forward(env.mjModel, env.mjData)
+
+    lin_jacobian_b = env.feet_jacobians(frame="base")
+    lin_jacobian_w = env.feet_jacobians(frame="world")
+
+    return lin_jacobian_b, lin_jacobian_w

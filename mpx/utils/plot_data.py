@@ -5,6 +5,7 @@ This file creates plots from custom datasets. The plots are for 'mjx_quad.py'.
 import numpy as np
 import matplotlib.pyplot as plt
 import os
+from utils.kf_utils import rmse
 
 def base_plot(time, base_pos):
     # trajectory
@@ -169,4 +170,74 @@ def compare_estimation_plot(time,
 
         if not show_legend: legend.remove()
     plt.tight_layout()
+    plt.show()
+
+def estimation_plot(gt_value, est_value, label, title, start=None, end=None, calc_rmse=True):
+    num_dim = gt_value[0].shape[0]
+
+    fig, axes = plt.subplots(num_dim, 1, figsize=(15,20), constrained_layout=True)
+    if calc_rmse: errors = rmse(gt_value, est_value)
+    if start is None: start = 0
+    if end is None: end = gt_value.shape[0]
+
+    for i in range(num_dim):
+        axes[i].plot(np.arange(end-start), est_value[start:end, i], label=f"{label} - kf", color="salmon")
+        axes[i].plot(np.arange(end-start), gt_value[start:end, i], label=f"{label} - gt", alpha=0.8, color="green")
+
+        if calc_rmse: axes[i].set_title(f"error: {errors[i]:.4f}")
+
+    fig.suptitle(title, fontsize=16)
+
+    handles, labels = axes[0].get_legend_handles_labels()
+    axes[0].legend(handles, labels, loc="upper right")
+
+    plt.show()
+
+def contact_state_plot(gt_value, est_value, start, end, title, legs=("FL", "FR", "RL", "RR")):
+    num_legs = gt_value.shape[1]
+    fig, axes = plt.subplots(num_legs, 1, figsize=(15, 6), constrained_layout=True, sharex=True)
+
+    t = np.arange(end - start)
+    for i in range(num_legs):
+        gt_i = gt_value[start:end, i].astype(int)
+        est_i = est_value[start:end, i].astype(int)
+
+        # Step-Plots für binäre Signale
+        axes[i].step(t, gt_i, where="post", label="gt", color="green", linewidth=2)
+        axes[i].step(t, est_i + 0.05, where="post", label="est", color="salmon", linewidth=1.5)  # kleiner Offset
+
+        # Mismatch als roter Hintergrund
+        mismatch = gt_i != est_i
+        axes[i].fill_between(t, -0.1, 1.15, where=mismatch, color="red", alpha=0.15, step="post")
+
+        # Accuracy statt RMSE
+        acc = np.mean(gt_i == est_i)
+        fp = np.mean((gt_i == 0) & (est_i == 1))
+        fn = np.mean((gt_i == 1) & (est_i == 0))
+        axes[i].set_title(f"{legs[i]}  |  acc: {acc:.3f}  FP: {fp:.3f}  FN: {fn:.3f}")
+
+        axes[i].set_ylim(-0.15, 1.25)
+        axes[i].set_yticks([0, 1])
+        axes[i].set_ylabel("contact")
+
+    axes[0].legend(loc="upper right")
+    axes[-1].set_xlabel("timestep")
+    fig.suptitle(title, fontsize=16)
+    plt.show()
+
+def force_estimation_plot(gt_value, est_value, label, start, end, title):
+    fig, axes = plt.subplots(4, 3, figsize=(50,20), constrained_layout=True)
+
+    leg_labels = np.arange(start=1, stop=5)
+    force_labels = ['x', 'y', 'z']
+    for i in range(4):
+        for j in range(3):
+            axes[i, j].plot(np.arange(end-start), est_value[start:end, i, j], label=f"{label} - kf", color="salmon")
+            axes[i, j].plot(np.arange(end-start), gt_value[start:end, i, j], label=f"{label} - gt", alpha=0.8, color="green")
+            error = rmse(gt_value[:, i, j], est_value[:, i, j])
+            axes[i, j].set_title(f"leg {leg_labels[i]} - {force_labels[j]} | rmse: {error:.4f}")
+            axes[i, j].set_ylabel(f'leg {leg_labels[i]} - {force_labels[j]}')
+            axes[i, j].legend()
+
+    fig.suptitle(title, fontsize=16)
     plt.show()
