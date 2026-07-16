@@ -305,8 +305,6 @@ def log_values(dataset, sim_num, dt, t, qpos, qvel, qacc, tau_total, contact_sta
     dataset["contact_forces"][sim_num].append(contact_forces.copy())
     dataset["contact_pos_des"][sim_num].append(q.copy())
 
-
-
 def save_dataset(dataset, dataset_path):
     # convert data to numpy array
     for i in dataset:
@@ -319,7 +317,7 @@ def save_dataset(dataset, dataset_path):
             next_run = last_run + 1
 
     np.savez(f"{dataset_path}/quad_mass_dataset_run{next_run}.npz", **dataset)
-    print("Data saved.")
+    print(f"Data saved in: {dataset_path}/quad_mass_dataset_run{next_run}.npz")
 
 # store values in lists, convert them later to numpy arrays
 custom_dataset = {"dt":[],
@@ -349,8 +347,8 @@ custom_dataset = {"dt":[],
                   "contact_pos_des":[]
                   }
 
-num_simulations = 5
-max_steps = 500
+num_simulations = 25
+max_steps = 1000
 q_init = env.mjData.qpos.copy()
 dq_init = env.mjData.qvel.copy()
 
