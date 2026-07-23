@@ -27,7 +27,7 @@ class ContextEncoderLSTM(nn.Module):
         z = self.output_layer(last_hidden)
         return z
 
-def create_lstm_dataset(dataset_path, n_h, train_size=0.75):
+def create_lstm_dataset(dataset_path, n_h):
     data = load_custom_dataset(dataset_path=Path.cwd().parent / dataset_path)
     num_datasets = data["num_datasets"]
     num_datapoints = data["num_datapoints"]

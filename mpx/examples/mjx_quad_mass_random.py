@@ -13,7 +13,8 @@ from gym_quadruped.quadruped_env import QuadrupedEnv
 from gym_quadruped.utils.mujoco.visual import render_sphere, render_vector
 
 import mpx.utils.mpc_wrapper as mpc_wrapper
-import mpx.config.config_aliengo as config
+import mpx.config.config_aliengo as config_aliengo
+import mpx.config.config_go2 as config_go2
 
 from timeit import default_timer as timer
 
@@ -27,6 +28,7 @@ from tqdm import tqdm
 
 # Define robot and scene parameters
 robot_name = "aliengo"   # "aliengo", "mini_cheetah", "go2", "hyqreal", ...
+config = config_aliengo
 scene_name = "flat" # "random_boxes"
 robot_feet_geom_names = dict(FR='FR',FL='FL', RR='RR' , RL='RL')
 robot_leg_joints = dict(FR=['FR_hip_joint', 'FR_thigh_joint', 'FR_calf_joint', ],
@@ -62,7 +64,7 @@ nominal_base_mass = env.mjModel.body_mass[BASE_BODY_ID].copy()
 nominal_base_inertia = env.mjModel.body_inertia[BASE_BODY_ID].copy()  # principal moments (3,)
 nominal_base_iquat = env.mjModel.body_iquat[BASE_BODY_ID].copy()     # principal-axes orientation
 nominal_base_ipos = env.mjModel.body_ipos[BASE_BODY_ID].copy()       # CoM offset in the body frame
-base_mass_offset_range = (-3.0, 3.0)             # sampled base mass = nominal_mass + U(lo, hi) [kg]
+base_mass_offset_range = (-5.0, 5.0)             # sampled base mass = nominal_mass + U(lo, hi) [kg]
 inertia_density_offset_range = (-0.02, 0.02)     # offset for the 3 inertia "density" terms [kg m^2]
 rotation_offset_range = (-0.1, 0.1)              # small rotation-vector offset for principal axes [rad]
 ipos_offset_range = (-0.02, 0.02)                # offset for the base CoM position [m]
@@ -242,7 +244,7 @@ def compute_tau_components(model, data, qpos, qvel, qacc):
     return tau_m, tau_c, tau_g
 
 # add values to dataset
-def log_values(dataset, sim_num, dt, t, qpos, qvel, qacc, tau_total, contact_states, contact_pos, contact_forces, q, base_mass, model, data):
+def log_values(target_dict, dt, t, qpos, qvel, qacc, tau_total, contact_states, contact_pos, contact_forces, q, base_mass, model, data):
     """
     Docstring for log_values
 
@@ -271,39 +273,39 @@ def log_values(dataset, sim_num, dt, t, qpos, qvel, qacc, tau_total, contact_sta
     diff_tau_c_nom = tau_c - tau_c_nom
     diff_tau_g_nom = tau_g - tau_g_nom
 
-    dataset["dt"][sim_num].append(dt)
-    dataset["time"][sim_num].append(t)
+    target_dict["dt"].append(dt)
+    target_dict["time"].append(t)
 
     # --- Base ---
-    dataset["base_pos"][sim_num].append(qpos[0:3].copy())
-    dataset["base_orient"][sim_num].append(qpos[3:7].copy()) # stored as quaternion
-    dataset["base_vel"][sim_num].append(qvel[0:3].copy())
-    dataset["base_ang_vel"][sim_num].append(qvel[3:6].copy())
-    dataset["base_acc"][sim_num].append(qacc[0:6].copy())
-    dataset["base_mass"][sim_num].append(base_mass)
+    target_dict["base_pos"].append(qpos[0:3].copy())
+    target_dict["base_orient"].append(qpos[3:7].copy()) # stored as quaternion
+    target_dict["base_vel"].append(qvel[0:3].copy())
+    target_dict["base_ang_vel"].append(qvel[3:6].copy())
+    target_dict["base_acc"].append(qacc[0:6].copy())
+    target_dict["base_mass"].append(base_mass)
 
     # --- Joint ---
-    dataset["joint_pos"][sim_num].append(qpos[7:].copy())
-    dataset["joint_vel"][sim_num].append(qvel[6:].copy())
-    dataset["joint_acc"][sim_num].append(qacc[6:].copy())
-    dataset["joint_torque"][sim_num].append(tau_total.copy())
+    target_dict["joint_pos"].append(qpos[7:].copy())
+    target_dict["joint_vel"].append(qvel[6:].copy())
+    target_dict["joint_acc"].append(qacc[6:].copy())
+    target_dict["joint_torque"].append(tau_total.copy())
 
     # --- Dynamics decomposition (full generalized coords: base 6 DOF + joints) ---
-    dataset["tau_m"][sim_num].append(tau_m.copy())
-    dataset["tau_c"][sim_num].append(tau_c.copy())
-    dataset["tau_g"][sim_num].append(tau_g.copy())
-    dataset["tau_m_nom"][sim_num].append(tau_m_nom.copy())
-    dataset["tau_c_nom"][sim_num].append(tau_c_nom.copy())
-    dataset["tau_g_nom"][sim_num].append(tau_g_nom.copy())
-    dataset["diff_tau_m_nom"][sim_num].append(diff_tau_m_nom.copy())
-    dataset["diff_tau_c_nom"][sim_num].append(diff_tau_c_nom.copy())
-    dataset["diff_tau_g_nom"][sim_num].append(diff_tau_g_nom.copy())
+    target_dict["tau_m"].append(tau_m.copy())
+    target_dict["tau_c"].append(tau_c.copy())
+    target_dict["tau_g"].append(tau_g.copy())
+    target_dict["tau_m_nom"].append(tau_m_nom.copy())
+    target_dict["tau_c_nom"].append(tau_c_nom.copy())
+    target_dict["tau_g_nom"].append(tau_g_nom.copy())
+    target_dict["diff_tau_m_nom"].append(diff_tau_m_nom.copy())
+    target_dict["diff_tau_c_nom"].append(diff_tau_c_nom.copy())
+    target_dict["diff_tau_g_nom"].append(diff_tau_g_nom.copy())
 
     # --- Contact ---
-    dataset["contact_states"][sim_num].append(contact_states.copy())
-    dataset["contact_pos"][sim_num].append(contact_pos.copy())
-    dataset["contact_forces"][sim_num].append(contact_forces.copy())
-    dataset["contact_pos_des"][sim_num].append(q.copy())
+    target_dict["contact_states"].append(contact_states.copy())
+    target_dict["contact_pos"].append(contact_pos.copy())
+    target_dict["contact_forces"].append(contact_forces.copy())
+    target_dict["contact_pos_des"].append(q.copy())
 
 def save_dataset(dataset, dataset_path):
     # convert data to numpy array
@@ -357,112 +359,132 @@ dt = env.simulation_dt # constant for each simulation
 log_and_save = True
 old_dt = 0
 
-for sim_num in range(num_simulations):
+height_limit = 0.25 # re-do run when height is below this value (indicating robot fell)
 
+sim_num = 0
+MAX_ATTEMPTS_PER_RUN = 5
+while sim_num < num_simulations:
     # ADDED BY ME: reset environment after each simulation
     if not env.viewer.is_running():
         break
 
-    env.reset(qpos=q_init, qvel=dq_init, random=False)
+    for attempt in range(MAX_ATTEMPTS_PER_RUN):
+        env.reset(qpos=q_init, qvel=dq_init, random=False)
 
-    # ADDED BY ME: sample a new base mass + spatial inertia for this simulation run
-    base_mass, base_inertia_diag, base_iquat, base_ipos = sample_base_spatial_inertia(
-        env, nominal_base_mass, nominal_base_inertia, nominal_base_iquat, nominal_base_ipos,
-        base_mass_offset_range, inertia_density_offset_range,
-        rotation_offset_range, ipos_offset_range, rng)
-    print(f"Sampled base mass: {base_mass:.3f} kg base_inertia_diag: {base_inertia_diag} base_iquat: {base_iquat} base_ipos: {base_ipos}")
+        # ADDED BY ME: sample a new base mass + spatial inertia for this simulation run
+        base_mass, base_inertia_diag, base_iquat, base_ipos = sample_base_spatial_inertia(
+            env, nominal_base_mass, nominal_base_inertia, nominal_base_iquat, nominal_base_ipos,
+            base_mass_offset_range, inertia_density_offset_range,
+            rotation_offset_range, ipos_offset_range, rng)
+        print(f"Sampled base mass: {base_mass:.3f} kg base_inertia_diag: {base_inertia_diag} base_iquat: {base_iquat} base_ipos: {base_ipos}")
 
-    # ADDED BY ME: scratch model/data for compute_tau_components, created once per
-    # simulation run (after the spatial-inertia randomization above, so they
-    # reflect the sampled mass/inertia) -- never the live env.mjModel/env.mjData.
-    dyn_model = copy.deepcopy(env.mjModel)
-    dyn_data = copy.deepcopy(env.mjData)
+        # ADDED BY ME: scratch model/data for compute_tau_components, created once per
+        # simulation run (after the spatial-inertia randomization above, so they
+        # reflect the sampled mass/inertia) -- never the live env.mjModel/env.mjData.
+        dyn_model = copy.deepcopy(env.mjModel)
+        dyn_data = copy.deepcopy(env.mjData)
 
-    mpc.reset(q_init, dq_init)
-    tau = jnp.zeros(config.n_joints)
-    env.render()
-
-    # ADDED BY ME: make the robot move on its own by sampling linear velocity and angular velocity for each simulation
-    vx = rng.uniform(-0.5, 1)
-    vy = rng.uniform(-0.1, 0.1)
-    az = rng.uniform(-0.5, 0.5)
-
-    ref_base_lin_vel = np.array([vx, vy, 0.])
-    ref_base_ang_vel = np.array([0, 0, az])
-
-    print(f"ref_base_lin_vel = {ref_base_lin_vel}")
-    print(f"ref_base_ang_vel = {ref_base_ang_vel}")
-
-    for counter in tqdm(range(max_steps), desc=f"Running simulation {sim_num+1}"):
-        if not env.viewer.is_running():
-            break
-
-        qpos = env.mjData.qpos.copy()
-        qvel = env.mjData.qvel.copy()
-        qacc = env.mjData.qacc.copy() # ADDED BY ME: get base and joint accelaration
-        if (counter % (sim_frequency / mpc_frequency) == 0 or counter == 0):
-
-            input = np.array([ref_base_lin_vel[0],ref_base_lin_vel[1],ref_base_lin_vel[2],
-                            ref_base_ang_vel[0],ref_base_ang_vel[1],ref_base_ang_vel[2],
-                            config.robot_height])
-
-            contact_temp, contact_pos_temp, contact_forces_temp = env.feet_contact_state(ground_reaction_forces=True) # ADDED BY ME: set parameter to get contact forces
-
-            contact_states = np.array([contact_temp[robot_feet_geom_names[leg]] for leg in ['FL','FR','RL','RR']])
-            contact_forces = np.array([contact_forces_temp[robot_feet_geom_names[leg]] for leg in ['FL','FR','RL','RR']]) # ADDED BY ME: get values for contact forces
-
-            contact_pos = np.full((4, 3), np.nan, dtype=np.float32) # ADDED BY ME: store contact position in a matrix with each leg
-            for i, leg in enumerate(['FL','FR','RL','RR']):
-                if contact_states[i]:
-                    contacts = contact_pos_temp[robot_feet_geom_names[leg]]
-                    contact_pos[i] = contacts[0].pos
-
-            # DEBUG: check the vertical force balance against the sampled base mass.
-            # contact_forces is (4, 3) -- one [Fx, Fy, Fz] row per leg -- so column 2 is Fz.
-            # force_z = contact_forces[:, 2]
-            # print(f"Fz per leg: {np.round(force_z, 2)}  total Fz: {np.sum(force_z):.2f} N  mass*g: {base_mass*9.81:.2f} N", flush=True)
-
-            if counter != 0:
-                for i in range(delay):
-                    qpos = env.mjData.qpos.copy()
-                    qvel = env.mjData.qvel.copy()
-                    qacc = env.mjData.qacc.copy() # ADDED BY ME: get base and joint accelaration
-                    # tau_fb = K@(x-np.concatenate([qpos,qvel]))
-
-                    tau_fb = 10*(q-qpos[7:7+config.n_joints]) -2*(qvel[6:6+config.n_joints])
-                    state, reward, is_terminated, is_truncated, info = env.step(action=tau + tau_fb)
-
-                    t = env.simulation_time
-                    log_values(custom_dataset, sim_num, dt, t, qpos, qvel, qacc, tau+tau_fb, contact_states, contact_pos, contact_forces, q, base_mass, dyn_model, dyn_data) # ADDED BY ME: add values to dataset
-
-                    counter += 1
-
-            start = timer()
-            tau, q, dq = mpc.run(qpos,qvel,input,contact_states,base_mass=base_mass,
-                                  base_inertia_diag=base_inertia_diag,base_iquat=base_iquat,
-                                  base_ipos=base_ipos)
-            stop = timer()
-            #print("Time taken for MPC: ", stop-start)
-
-            stop = timer()
-            # for i in range(4):
-            #     render_sphere(env.viewer,
-            #                   collision_point[3*i:3*i+3],
-            #                   0.2,
-            #                   np.array([1, 0, 0, 0.5]),
-            #                   ids[i])
-
-        tau_fb = 10*(q-qpos[7:7+config.n_joints])-2*(qvel[6:6+config.n_joints])
-        state, reward, is_terminated, is_truncated, info = env.step(action= tau + tau_fb)
-
-        t = env.simulation_time
-        log_values(custom_dataset, sim_num, dt, t, qpos, qvel, qacc, tau+tau_fb, contact_states, contact_pos, contact_forces, q, base_mass, dyn_model, dyn_data) # ADDED BY ME: add values to dataset
-
-        # time.sleep(0.1)
-        counter += 1
+        mpc.reset(q_init, dq_init)
+        tau = jnp.zeros(config.n_joints)
         env.render()
 
-    print(f"\n----- Simulation {sim_num+1} finished -----\n")
+        # ADDED BY ME: make the robot move on its own by sampling linear velocity and angular velocity for each simulation
+        vx = rng.uniform(-0.5, 1)
+        vy = rng.uniform(-0.1, 0.1)
+        az = rng.uniform(-0.5, 0.5)
+
+        ref_base_lin_vel = np.array([vx, vy, 0.])
+        ref_base_ang_vel = np.array([0, 0, az])
+
+        print(f"ref_base_lin_vel = {ref_base_lin_vel}")
+        print(f"ref_base_ang_vel = {ref_base_ang_vel}")
+
+        fell = False
+        run_buffer = {k: [] for k in custom_dataset.keys()}
+        for counter in tqdm(range(max_steps), desc=f"Running simulation {sim_num+1}"):
+            if not env.viewer.is_running():
+                break
+
+            qpos = env.mjData.qpos.copy()
+            qvel = env.mjData.qvel.copy()
+            qacc = env.mjData.qacc.copy() # ADDED BY ME: get base and joint accelaration
+
+            if qpos[2] < height_limit:
+                print(f"\nWARNING: Robot base height: {qpos[2]} (robot fell down). Re-running simulation no. {sim_num+1}\n")
+                fell = True
+                break
+            if (counter % (sim_frequency / mpc_frequency) == 0 or counter == 0):
+
+                input = np.array([ref_base_lin_vel[0],ref_base_lin_vel[1],ref_base_lin_vel[2],
+                                ref_base_ang_vel[0],ref_base_ang_vel[1],ref_base_ang_vel[2],
+                                config.robot_height])
+
+                contact_temp, contact_pos_temp, contact_forces_temp = env.feet_contact_state(ground_reaction_forces=True) # ADDED BY ME: set parameter to get contact forces
+
+                contact_states = np.array([contact_temp[robot_feet_geom_names[leg]] for leg in ['FL','FR','RL','RR']])
+                contact_forces = np.array([contact_forces_temp[robot_feet_geom_names[leg]] for leg in ['FL','FR','RL','RR']]) # ADDED BY ME: get values for contact forces
+
+                contact_pos = np.full((4, 3), np.nan, dtype=np.float32) # ADDED BY ME: store contact position in a matrix with each leg
+                for i, leg in enumerate(['FL','FR','RL','RR']):
+                    if contact_states[i]:
+                        contacts = contact_pos_temp[robot_feet_geom_names[leg]]
+                        contact_pos[i] = contacts[0].pos
+
+                # DEBUG: check the vertical force balance against the sampled base mass.
+                # contact_forces is (4, 3) -- one [Fx, Fy, Fz] row per leg -- so column 2 is Fz.
+                # force_z = contact_forces[:, 2]
+                # print(f"Fz per leg: {np.round(force_z, 2)}  total Fz: {np.sum(force_z):.2f} N  mass*g: {base_mass*9.81:.2f} N", flush=True)
+
+                if counter != 0:
+                    for i in range(delay):
+                        qpos = env.mjData.qpos.copy()
+                        qvel = env.mjData.qvel.copy()
+                        qacc = env.mjData.qacc.copy() # ADDED BY ME: get base and joint accelaration
+                        # tau_fb = K@(x-np.concatenate([qpos,qvel]))
+
+                        tau_fb = 10*(q-qpos[7:7+config.n_joints]) -2*(qvel[6:6+config.n_joints])
+                        state, reward, is_terminated, is_truncated, info = env.step(action=tau + tau_fb)
+
+                        t = env.simulation_time
+                        log_values(run_buffer, dt, t, qpos, qvel, qacc, tau+tau_fb, contact_states, contact_pos, contact_forces, q, base_mass, dyn_model, dyn_data) # ADDED BY ME: add values to dataset
+
+                        counter += 1
+
+                start = timer()
+                tau, q, dq = mpc.run(qpos,qvel,input,contact_states,base_mass=base_mass,
+                                    base_inertia_diag=base_inertia_diag,base_iquat=base_iquat,
+                                    base_ipos=base_ipos)
+                stop = timer()
+                #print("Time taken for MPC: ", stop-start)
+
+                stop = timer()
+                # for i in range(4):
+                #     render_sphere(env.viewer,
+                #                   collision_point[3*i:3*i+3],
+                #                   0.2,
+                #                   np.array([1, 0, 0, 0.5]),
+                #                   ids[i])
+
+            tau_fb = 10*(q-qpos[7:7+config.n_joints])-2*(qvel[6:6+config.n_joints])
+            state, reward, is_terminated, is_truncated, info = env.step(action= tau + tau_fb)
+
+            t = env.simulation_time
+            log_values(run_buffer, dt, t, qpos, qvel, qacc, tau+tau_fb, contact_states, contact_pos, contact_forces, q, base_mass, dyn_model, dyn_data) # ADDED BY ME: add values to dataset
+
+            # time.sleep(0.1)
+            counter += 1
+            env.render()
+
+        if not fell:
+            for k in custom_dataset.keys():
+                custom_dataset[k][sim_num] = run_buffer[k]
+            sim_num += 1
+            break
+    else:
+        print(f"WARNING: Sim {sim_num+1} failed after {MAX_ATTEMPTS_PER_RUN} attempts")
+        sim_num += 1
+
+    print(f"\n----- Simulation {sim_num} finished -----\n")
 
 env.close()
 
