@@ -4,6 +4,11 @@ import numpy as np
 from utils.state_estimation import KF
 from utils.kf_utils import quat_to_rot, get_inertia_matrix, get_jacobian
 from utils.dynamics_model import *
+from felan.models.log_chol_cadelac_pot_param import CaDeLaCLogChol, get_config_from_dict
+from felan.train import load_model_fn
+import jax.numpy as jnp
+import jax
+from collections import deque
 
 def run_state_estimation(dt,
                          base_orient,
@@ -13,6 +18,7 @@ def run_state_estimation(dt,
                          joint_acc,
                          Q,
                          R,
+                         base_vel=None,
                          base_acc=None,
                          joint_torque=None,
                          contact_forces=None,
@@ -22,7 +28,9 @@ def run_state_estimation(dt,
                          L1=100,
                          L2=10000, # based on paper: L2 = L1²
                          contact_thresholds=np.array([15,15,15,15]),
-                         est_mode=1):
+                         est_mode=1,
+                         cadelac_path=None,
+                         tau_diff=None):
     """Run the Kalman Filter state estimation.
 
     est_mode:
@@ -65,11 +73,38 @@ def run_state_estimation(dt,
     c_force_info = True
     c_state_info = True
 
+    time_window = 0
+    history_buf = deque(maxlen=time_window) if cadelac is not None else None
+    if cadelac_path is not None:
+        params, hyper = load_model_fn(cadelac_path.name, cadelac_path.parent)
+        nn_config = get_config_from_dict(hyper)
+        model = CaDeLaCLogChol(hyper['nv_dof'], nn_config)
+        cadelac = jax.jit(model.apply)
+        time_window = hyper["time_window"]
+        history = None
+
+    def build_feature_vector(base_orient_i, base_vel_i, base_ang_vel_i, base_pos_z_i, diff_tau_i):
+        return np.concatenate([base_orient_i, base_vel_i, base_ang_vel_i, base_pos_z_i, diff_tau_i])
+
     for i in tqdm(range(num_data), desc="Running state estimation"):
         orient = base_orient[i]
         J_b, J_w = get_jacobian(leg_odom.env, orient, joint_pos[i], joint_vel[i])
-        inertia_matrix = get_inertia_matrix(leg_odom.env)
-        qfrc_bias = leg_odom.env.mjData.qfrc_bias.copy()
+        if cadelac_path is not None:
+            if i > 0:
+                history_buf.append(build_feature_vector(base_orient[i-1], base_vel[i-1], base_ang_vel[i-1], kf.get_pos()[2], tau_diff[i]))
+
+        if cadelac_path is None or len(history_buf) < time_window:
+            inertia_matrix = get_inertia_matrix(leg_odom.env)
+            qfrc_bias = leg_odom.env.mjData.qfrc_bias.copy()
+        else:
+            history = jnp.array(history_buf)[None, ...]
+            q = np.concatenate([kf.get_pos(), base_orient[i]]) # convert orient to euler
+            qd = np.concatenate([kf.get_lin_vel(), base_ang_vel[i]]) 
+            qdd = jnp.array(joint_acc[i])[None, ...]
+
+            tau_pred, dEdt, extras = cadelac(params, q, qd, qdd, history)
+            inertia_matrix = np.asarray(extras["M"])[0]
+            qfrc_bias = np.asarray(extras["qfrc_bias"])[0]
 
         # estimate contact state if not given, either with thresholding singular contact force value or based on momentum
         if contact_states is None:
