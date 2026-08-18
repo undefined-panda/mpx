@@ -1,6 +1,8 @@
 import numpy as np
+import jax.numpy as jnp
+import jax
 import mujoco
-from mpx.utils.kf_utils import skew
+from mpx.utils.kf_utils import skew, _xp
 
 def estimate_acc_from_contact_force(mass, contact_states, contact_forces) ->  np.ndarray:
     """Estimate base acceleration from contact force by using Newton's second law of motion
@@ -56,16 +58,17 @@ def estimate_acc_from_contact_force_v2(env, joint_acc, contact_forces, contact_s
     
     return base_acc[:3]
 
-def estimate_acc_from_contact_force_v3(joint_acc, contact_forces, contact_states, contact_pos_b, orient, M, qfrc_bias) -> np.ndarray:
-    force = np.zeros((6,))
+def estimate_acc_from_contact_force_v3(joint_acc, contact_forces, contact_states, contact_pos_b, orient, M, qfrc_bias, enable_jax=False):
+    xp = _xp(enable_jax)
+    force = xp.zeros((6,))
 
     # sum jacobians of all legs that are in contact
     for i in range(4):
         c_i = contact_states[i]
         cf_i = contact_forces[i]
         cp_i = orient @ contact_pos_b[i] # contact position of foot in world frame relative to base, i.e. R @ contact_pos_b
-        jacobian = np.concat([np.eye(3), skew(cp_i)]) # also considering angular acceleration
-        force += c_i * (jacobian @ cf_i)
+        jacobian = xp.concatenate([xp.eye(3), skew(cp_i, enable_jax=enable_jax)], axis=0) # also considering angular acceleration
+        force = force + c_i * (jacobian @ cf_i)
 
     # qfrc_bias = env.mjData.qfrc_bias # contains coriolis and gravitational terms for each DOF, shape == (18,)
 
@@ -75,12 +78,36 @@ def estimate_acc_from_contact_force_v3(joint_acc, contact_forces, contact_states
     H_B = M[:6, :6]
     H_BL = M[:6, 6:18]
 
-    rhs = - H_BL @ joint_acc - qfrc_bias[:6] + force[:6]
-    base_acc = np.linalg.solve(H_B, rhs)
-    
-    return base_acc[:6]
+    if H_BL.shape[1] > 6: # full 18x18-inertia (MuJoCo)
+        coupling = H_BL @ joint_acc
+    else: # 6x6 Base-only (CaDeLaC): no leg-coupling
+        coupling = xp.zeros(6)
 
-def estimate_contact_forces(joint_torque, contact_state, legs_order, J_w):
+    rhs = -coupling - qfrc_bias[:6] + force[:6]   
+    return xp.linalg.solve(H_B, rhs)[:6] # base acc
+
+def estimate_acc_from_contact_force_v4(joint_acc, contact_forces, contact_states, contact_pos_b, orient, M, qfrc_bias, enable_jax=False):
+    xp = _xp(enable_jax)
+    cs = xp.asarray(contact_states).astype(orient.dtype)
+    cp_w = contact_pos_b @ orient.T
+    cf = xp.asarray(contact_forces)
+
+    lin = xp.sum(cs[:, None] * cf, axis=0)
+    ang = xp.sum(cs[:, None] * xp.cross(cp_w, cf), axis=0)
+    force = xp.concatenate([lin, ang])
+
+    H_B = M[:6, :6]
+    H_BL = M[:6, 6:18]
+
+    if M.shape[1] > 6:
+        coupling = H_BL @ joint_acc
+    else:
+        coupling = xp.zeros(6)
+
+    rhs = -coupling - qfrc_bias[:6] + force
+    return xp.linalg.solve(H_B, rhs)[:6]
+
+def estimate_contact_forces(joint_torque, contact_state, legs_order, J_w, enable_jax=False):
     """Estimate forces acting on the contact points (feet) using the dynamics model.
 
     Currently: tau = J * f -> f = (J^-1) * tau
@@ -94,18 +121,32 @@ def estimate_contact_forces(joint_torque, contact_state, legs_order, J_w):
     Return:
         Estimation of contact force for each leg in contact
     """
-    
+    xp = _xp(enable_jax)
     contact_forces = []
 
     # sum jacobians of all legs that are in contact
     for i in range(4):
         J_lin = J_w[legs_order[i]][:, 6 + 3*i : 6 + 3*(i+1)] # create 3x3 matrix of values corresponding to current leg
-        tau_leg = joint_torque[3*i : 3*(i+1)] # same for torque
-        
-        c_force = contact_state[i] * (-np.linalg.pinv(J_lin.T) @ tau_leg)
+        tau_leg = joint_torque[3*i : 3*(i+1)] # same for torque        
+        c_force = contact_state[i] * (-xp.linalg.pinv(J_lin.T) @ tau_leg)
         contact_forces.append(c_force)
     
-    return np.array(contact_forces)
+    return xp.stack(contact_forces)
+
+def estimate_contact_forces_v2(joint_torque, contact_state, J_w_stacked, enable_jax=False):
+    """J_w_stacked: (4, 3, nv) per-leg world-frame linear Jacobians, stacked in
+    legs_order. Replaces the previous per-leg dict lookup (`legs_order`/`J_w`) so this
+    function is usable as-is inside a jax.lax.scan step, where a dict keyed by leg-name
+    strings isn't a valid pytree leaf layout for a scanned input."""
+    xp = _xp(enable_jax)
+    J_blocks = xp.stack([J_w_stacked[i, :, 6 + 3*i : 6 + 3*(i+1)] for i in range(4)])
+    tau_blocks = xp.stack([joint_torque[3*i : 3*(i+1)] for i in range(4)])
+    cs = xp.asarray(contact_state).astype(J_blocks.dtype)
+
+    J_T = xp.transpose(J_blocks, (0, 2, 1))
+    pinvs = xp.linalg.pinv(J_T)
+    forces = -xp.einsum('lij,lj->li', pinvs, tau_blocks)
+    return forces * cs[:, None]
 
 def estimate_contact_states(contact_force, threshold):
     return contact_force > threshold
@@ -118,7 +159,7 @@ class GMContactObserver:
         self.dt = dt
         self.L1 = L1
         self.L2 = L2
-        self.thresholds = thresholds
+        self.thresholds = np.array(thresholds)
         self.torque = np.zeros(18)
 
         self.alpha = 0.8
@@ -159,4 +200,49 @@ class GMContactObserver:
         self.f_hat_prev = f_filtered
 
         contact_state = f_filtered[2::3] < self.thresholds
+        return contact_state, f_filtered
+
+class GMContactObserver_JAX:
+    def __init__(self, dt, L1, L2, thresholds):
+        self.p_hat = jnp.zeros(18)
+        self.f_hat = jnp.zeros(12)
+        self.f_hat_prev = jnp.zeros(12)
+        self.dt = dt
+        self.L1 = L1
+        self.L2 = L2
+        self.thresholds = jnp.asarray(thresholds)
+        self.alpha = 0.8
+        self._step_jit = jax.jit(self._step_impl)
+
+    @staticmethod
+    def _q(s):  return jnp.sign(s) * jnp.sqrt(jnp.abs(s)) + s
+    def _k1(self, s): return self._q(s)
+    def _k2(self, s): return jnp.sign(s) + self._q(s)
+
+    def _step_impl(self, p_hat, f_hat, f_hat_prev, vel, M, joint_torque, J, qfrc_bias):
+        torque = jnp.zeros(18).at[6:].set(joint_torque)
+        p_measured = M @ vel
+        tau_bar = torque - qfrc_bias
+        innovation = p_measured - p_hat
+
+        p_hat_dot = -J.T @ f_hat + tau_bar + self.L1 * self._k1(innovation)
+        f_hat_dot = self.L2 * self._k2(innovation[6:])
+
+        p_hat_new = p_hat + p_hat_dot * self.dt
+        f_hat_new = f_hat + f_hat_dot * self.dt
+        f_hat_new = f_hat_new.at[0::3].set(0.0)
+        f_hat_new = f_hat_new.at[1::3].set(0.0)
+        f_hat_new = f_hat_new.at[2::3].set(jnp.maximum(f_hat_new[2::3], 0.0))
+
+        f_filtered = self.alpha * f_hat_prev + (1 - self.alpha) * f_hat_new
+        contact_state = f_filtered[2::3] < self.thresholds
+        return p_hat_new, f_hat_new, f_filtered, contact_state
+
+    def step(self, vel, M, joint_torque, J, qfrc_bias):
+        p_hat_new, f_hat_new, f_filtered, contact_state = self._step_jit(
+            self.p_hat, self.f_hat, self.f_hat_prev, vel, M, joint_torque, J, qfrc_bias
+        )
+        self.p_hat = p_hat_new
+        self.f_hat = f_hat_new
+        self.f_hat_prev = f_filtered
         return contact_state, f_filtered

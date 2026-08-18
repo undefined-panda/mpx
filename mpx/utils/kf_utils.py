@@ -1,5 +1,9 @@
 import numpy as np
 import mujoco
+import jax.numpy as jnp
+
+def _xp(enable_jax):
+    return jnp if enable_jax else np
 
 def load_custom_dataset(dataset_path, sim_num=None, print_keys=False):
     dataset = np.load(dataset_path)
@@ -22,9 +26,10 @@ def load_custom_dataset(dataset_path, sim_num=None, print_keys=False):
 
     return data
 
-def skew(w):
+def skew(w, enable_jax=False):
+    xp = _xp(enable_jax)
     w1, w2, w3 = w
-    w_skew = np.array([[0, -w3, w2],
+    w_skew = xp.array([[0, -w3, w2],
                        [w3, 0, -w1],
                        [-w2, w1, 0]])
 
@@ -54,7 +59,37 @@ def matrix_log(R):
     log_matrix = (theta / (2 * np.sin(theta))) * (R - R.T)
     return skew_inverse(log_matrix)
 
-def quat_to_rot(orient):
+def quat_to_euler(orient, enable_jax=False):
+    """Convert quaternion [w, x, y, z] to Euler angles [roll, pitch, yaw] (ZYX / XYZ intrinsic).
+
+    Args:
+        orient (array-like): quaternion in [w, x, y, z] format
+        enable_jax (bool): use jax.numpy if True, else numpy
+
+    Returns:
+        array of shape (3,): [roll, pitch, yaw] in radians
+    """
+    xp = _xp(enable_jax)
+    w, x, y, z = orient
+
+    # roll (x-axis rotation)
+    sinr_cosp = 2.0 * (w * x + y * z)
+    cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
+    roll = xp.arctan2(sinr_cosp, cosr_cosp)
+
+    # pitch (y-axis rotation); clip to handle numerical noise at the poles
+    sinp = 2.0 * (w * y - z * x)
+    sinp = xp.clip(sinp, -1.0, 1.0)
+    pitch = xp.arcsin(sinp)
+
+    # yaw (z-axis rotation)
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    yaw = xp.arctan2(siny_cosp, cosy_cosp)
+
+    return xp.array([roll, pitch, yaw])
+
+def quat_to_rot(orient, enable_jax=False):
     """Convert quaternion to rotation matrix (source: https://cookierobotics.com/080/).
 
     Args:
@@ -63,13 +98,13 @@ def quat_to_rot(orient):
     Returns:
         np.ndarray: corresponding rotation matrix
     """
+    xp = _xp(enable_jax)
 
     w, x, y, z = orient
-    R = np.array([
-        [2*(w**2 + x**2) - 1, 2*(x*y - w*z)      , 2*(w*y + x*z)      ],
-        [2*(x*y + w*z)      , 2*(w**2 + y**2) - 1, 2*(y*z - w*x)      ],
-        [2*(x*z - w*y)      , 2*(y*z + w*x)      , 2*(w**2 + z**2) - 1]
-    ])
+    row0 = xp.stack([2*(w**2 + x**2) - 1, 2*(x*y - w*z)      , 2*(w*y + x*z)      ])
+    row1 = xp.stack([2*(x*y + w*z)      , 2*(w**2 + y**2) - 1, 2*(y*z - w*x)      ])
+    row2 = xp.stack([2*(x*z - w*y)      , 2*(y*z + w*x)      , 2*(w**2 + z**2) - 1])
+    R = xp.stack([row0, row1, row2])
 
     return R
 

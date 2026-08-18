@@ -64,8 +64,8 @@ nominal_base_mass = env.mjModel.body_mass[BASE_BODY_ID].copy()
 nominal_base_inertia = env.mjModel.body_inertia[BASE_BODY_ID].copy()  # principal moments (3,)
 nominal_base_iquat = env.mjModel.body_iquat[BASE_BODY_ID].copy()     # principal-axes orientation
 nominal_base_ipos = env.mjModel.body_ipos[BASE_BODY_ID].copy()       # CoM offset in the body frame
-base_mass_offset_range = (-5.0, 5.0)             # sampled base mass = nominal_mass + U(lo, hi) [kg]
-inertia_density_offset_range = (-0.02, 0.02)     # offset for the 3 inertia "density" terms [kg m^2]
+base_mass_offset_range = (0.0, 5.0)             # sampled base mass = nominal_mass + U(lo, hi) [kg]
+inertia_density_offset_range = (0.0, 0.02)     # offset for the 3 inertia "density" terms [kg m^2]
 rotation_offset_range = (-0.1, 0.1)              # small rotation-vector offset for principal axes [rad]
 ipos_offset_range = (-0.02, 0.02)                # offset for the base CoM position [m]
 
