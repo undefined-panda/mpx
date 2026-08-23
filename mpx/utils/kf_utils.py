@@ -1,25 +1,22 @@
 import numpy as np
 import mujoco
 
-def load_custom_dataset(dataset_path, sim_num):
+def load_custom_dataset(dataset_path, sim_num=None, print_keys=False):
     dataset = np.load(dataset_path)
 
-    data = {"num_datasets": len(dataset["time"]),
-            "num_datapoints": len(dataset["time"][0]),
-            "dt": dataset["dt"][sim_num],
-            "time": dataset["time"][sim_num],
-            "base_pos": dataset["base_pos"][sim_num],
-            "base_orient": dataset["base_orient"][sim_num],
-            "base_vel" : dataset["base_vel"][sim_num],
-            "base_ang_vel" : dataset["base_ang_vel"][sim_num],
-            "base_acc" : dataset["base_acc"][sim_num],
-            "joint_pos" : dataset["joint_pos"][sim_num],
-            "joint_vel" : dataset["joint_vel"][sim_num],
-            "joint_acc" : dataset["joint_acc"][sim_num],
-            "joint_torque" : dataset["joint_torque"][sim_num],
-            "contact_states" : dataset["contact_states"][sim_num],
-            "contact_pos" : dataset["contact_pos"][sim_num],
-            "contact_forces" : dataset["contact_forces"][sim_num]}
+    data = {
+        "num_datasets": dataset["time"].shape[0],
+        "num_datapoints": dataset["time"].shape[1],
+    }
+
+    if print_keys:
+        print("Dataset keys:")
+        for key in dataset.files:
+            print(f"- {key}")
+
+    for key in dataset.files:
+        arr = dataset[key]
+        data[key] = arr[sim_num] if sim_num is not None else arr
 
     print(f"Data loaded from {dataset_path}.")
 
