@@ -271,9 +271,15 @@ def _run_state_estimation_cadelac(dt, base_orient, base_ang_vel, joint_pos, join
     nn_config = get_config_from_dict(hyper)
     model = CaDeLaCLogChol(hyper['nv_dof'], nn_config)
     time_window = hyper["time_window"]
-    feature_dim = 30
-    kf_warmup = time_window
-    switch_idx = min(2 * time_window, num_data)
+
+    # The per-step feature width (17 for "base_pos_z", 16 for "base", 30 for "joint"
+    # -- see train_quad_cadelac.py's `input_values` cases) is purely a property of the
+    # checkpoint -- read it straight off the trained LSTM's first-layer input kernel
+    # rather than exposing it as a caller-supplied parameter (which would just be
+    # another way to get it wrong/stale relative to whichever checkpoint is loaded).
+    # `params` has an extra "params" nesting level (flax's `model.init(...)` convention
+    # of returning {"params": {...}}, which is also what's saved to/loaded from disk).
+    feature_dim = int(params["params"]["lstm"]["lstm_layer_0"]["ii"]["kernel"].shape[0])
 
     # ---- Stage A: MuJoCo precompute over the FULL trajectory (fast, plain numpy) ----
     stage_a = _precompute_mujoco_stage(leg_odom, np.asarray(base_orient), np.asarray(joint_pos), np.asarray(joint_vel))
@@ -299,8 +305,9 @@ def _run_state_estimation_cadelac(dt, base_orient, base_ang_vel, joint_pos, join
     qfrc_bias_mujoco_j = jnp.asarray(stage_a["qfrc_bias"])
 
     def shift1(arr):
-        # "value from step i-1", edge-padded at i=0 (never actually read there,
-        # since accumulate_mask[0] is False given kf_warmup >= 1).
+        # "value from step i-1", edge-padded at i=0 -- this doubles as the "initialize
+        # with the initial data" seed for directly-measured quantities (orientation,
+        # joint state): at i=0 there is no i-1, so we just reuse index 0 itself.
         return jnp.concatenate([arr[0:1], arr[:-1]], axis=0)
 
     base_orient_prev = shift1(base_orient_j)
@@ -311,20 +318,36 @@ def _run_state_estimation_cadelac(dt, base_orient, base_ang_vel, joint_pos, join
     joint_pos_prev_j = shift1(joint_pos_j)
     joint_vel_prev_j = shift1(joint_vel_j)
 
-    accumulate_mask = jnp.arange(num_data) > kf_warmup
-
     def build_feature_vector(*args):
         return jnp.concatenate([jnp.atleast_1d(jnp.asarray(a)) for a in args])
 
-    # ---- Build the xs (scanned-input) pytree, sliced per phase below ----
-    xs_full = {
+    # `tau_feature` is never the recorded dataset's ground-truth `tau_diff` except at
+    # the very first, pre-CaDeLaC seed step (see `feature_0` below) -- `tau_diff` is
+    # not a measurement, it's the residual torque (true payload-affected dynamics minus
+    # nominal MuJoCo dynamics) that CaDeLaC itself is trained to predict as `tau_pred`.
+    # Feeding the recorded ground truth into every step would leak information a real
+    # deployment never has; instead the model feeds back its OWN previous prediction
+    # (`carry["tau_pred_prev"]`), autoregressively.
+    def build_feature(base_orient_prev_i, base_vel_prev_i, base_ang_vel_prev_i, base_pos_z_prev_i,
+                       joint_pos_prev_i, joint_vel_prev_i, tau_feature_i):
+        if feature_dim == 30:  # input_values="joint"
+            return build_feature_vector(joint_pos_prev_i, joint_vel_prev_i, tau_feature_i)
+        elif feature_dim == 17:  # input_values="base_pos_z"
+            return build_feature_vector(base_orient_prev_i, base_vel_prev_i, base_ang_vel_prev_i,
+                                         base_pos_z_prev_i, tau_feature_i)
+        elif feature_dim == 16:  # input_values="base"
+            return build_feature_vector(base_orient_prev_i, base_vel_prev_i, base_ang_vel_prev_i, tau_feature_i)
+        else:
+            raise ValueError(f"Invalid feature dim: {feature_dim}")
+
+    # ---- Build the xs (scanned-input) pytree, covering the FULL trajectory ----
+    xs = {
         "base_orient": base_orient_j,
         "base_orient_prev": base_orient_prev,
         "base_ang_vel": base_ang_vel_j,
         "base_ang_vel_prev": base_ang_vel_prev,
         "base_vel_prev": base_vel_prev,
         "base_pos_z_prev": base_pos_z_prev,
-        "tau_diff": tau_diff_j,
         "joint_pos": joint_pos_j,
         "joint_pos_prev_j": joint_pos_prev_j,
         "joint_vel": joint_vel_j,
@@ -335,25 +358,33 @@ def _run_state_estimation_cadelac(dt, base_orient, base_ang_vel, joint_pos, join
         "p_b": p_b_j,
         "M_mujoco": M_mujoco_j,
         "qfrc_bias_mujoco": qfrc_bias_mujoco_j,
-        "accumulate_mask": accumulate_mask,
     }
     if joint_torque_j is not None:
-        xs_full["joint_torque"] = joint_torque_j
+        xs["joint_torque"] = joint_torque_j
     if contact_states_j is not None:
-        xs_full["contact_states"] = contact_states_j
+        xs["contact_states"] = contact_states_j
     if contact_forces_j is not None:
-        xs_full["contact_forces"] = contact_forces_j
+        xs["contact_forces"] = contact_forces_j
     if base_acc_j is not None:
-        xs_full["base_acc"] = base_acc_j
-        xs_full["base_acc_prev"] = base_acc_prev_j
+        xs["base_acc"] = base_acc_j
+        xs["base_acc_prev"] = base_acc_prev_j
 
-    def slice_xs(lo, hi):
-        return {k: v[lo:hi] for k, v in xs_full.items()}
+    # ---- Carry (recursive state threaded through the scan) ----
+    # CaDeLaC is usable from step 0: instead of zero-padding `history_j` and waiting
+    # `time_window` steps for it to fill with real data (which is what forced a
+    # separate MuJoCo-only warmup phase before), the whole buffer is seeded with
+    # `time_window` copies of the very first available feature vector -- a standard
+    # cold-start trick for streaming sequence models. `feature_0`'s components use
+    # whatever is genuinely available at step 0: directly measured quantities
+    # (joint_pos/vel, base_orient/ang_vel) come straight from index 0 (`shift1` already
+    # edge-pads to this); quantities that would otherwise require an estimate that
+    # doesn't exist yet (the running velocity estimate, the residual-torque prediction)
+    # use the same zero prior the carry itself starts from -- never the recorded
+    # dataset's ground truth, to avoid a one-off version of the same leakage the
+    # autoregressive `tau_pred` feedback fixes for every later step.
+    feature_0 = build_feature(base_orient_prev[0], jnp.zeros(3), base_ang_vel_prev[0], base_pos_z_prev[0],
+                               joint_pos_prev_j[0], joint_vel_prev_j[0], jnp.zeros(6))
 
-    xs1 = slice_xs(0, switch_idx)
-    xs2 = slice_xs(switch_idx, num_data)
-
-    # ---- Carry (recursive state threaded through both scan phases) ----
     x_size = kf_ref.x.shape[0]
     carry0 = {
         "x": jnp.zeros(x_size),
@@ -362,223 +393,170 @@ def _run_state_estimation_cadelac(dt, base_orient, base_ang_vel, joint_pos, join
         "B": kf_ref.B,
         "leg_pos": jnp.zeros(3),
         "leg_vel": jnp.zeros(3),
-        "history_j": jnp.zeros((time_window, feature_dim)),
-        "history_count": jnp.int32(0),
+        "history_j": jnp.tile(feature_0[None, :], (time_window, 1)),
+        "tau_pred_prev": jnp.zeros(6),
     }
     if not use_external_base_acc:
         carry0["base_acc_i"] = jnp.zeros(6)
-    carry0["tau_pred_prev"] = jnp.zeros(6)
     if use_gm_observer:
         carry0["p_hat"] = jnp.zeros(18)
         carry0["f_hat"] = jnp.zeros(12)
         carry0["f_hat_prev"] = jnp.zeros(12)
 
-    def make_step(cadelac_active):
-        def step(carry, xs_i):
-            orient = xs_i["base_orient"]
-            orient_rot = quat_to_rot(orient, enable_jax=True)
+    def step(carry, xs_i):
+        orient = xs_i["base_orient"]
+        orient_rot = quat_to_rot(orient, enable_jax=True)
 
-            # --- CaDeLaC feature-history buffer ---
-            # feature = build_feature_vector(xs_i["base_orient_prev"],
-            #                                 xs_i["base_vel_prev"],
-            #                                 xs_i["base_ang_vel_prev"],
-            #                                 xs_i["base_pos_z_prev"],
-            #                                 xs_i["tau_diff"])
-            # Autoregressive feedback: `tau_diff` is not a measurement -- it's the
-            # residual torque (true payload-affected dynamics minus nominal MuJoCo
-            # dynamics) that CaDeLaC itself is trained to predict as `tau_pred`. Once
-            # CaDeLaC is active, feeding the recorded dataset's ground-truth `tau_diff`
-            # here would leak information a real deployment never has; the model must
-            # feed back its OWN previous prediction (`carry["tau_pred_prev"]`) instead.
-            # Before CaDeLaC has run even once (phase 1 / warmup), no prediction exists
-            # yet, so the history is bootstrapped from the ground-truth `tau_diff` --
-            # unavoidable, and standard practice for autoregressive models.
-            tau_feature = carry["tau_pred_prev"] if cadelac_active else xs_i["tau_diff"]
-            feature = build_feature_vector(xs_i["joint_pos_prev_j"],
-                                            xs_i["joint_vel_prev_j"],
-                                            tau_feature)
-            rolled = jnp.roll(carry["history_j"], -1, axis=0).at[-1].set(feature)
-            if cadelac_active:
-                # Once active, every step accumulates unconditionally (matches the
-                # original loop: by construction this phase only ever contains
-                # indices where `i > kf_warmup` already holds).
-                new_history_j = rolled
-                new_history_count = carry["history_count"] + 1
-            else:
-                mask_i = xs_i["accumulate_mask"]
-                new_history_j = jnp.where(mask_i, rolled, carry["history_j"])
-                new_history_count = jnp.where(mask_i, carry["history_count"] + 1, carry["history_count"])
+        # --- CaDeLaC feature-history buffer ---
+        tau_feature = carry["tau_pred_prev"]
+        feature = build_feature(xs_i["base_orient_prev"], xs_i["base_vel_prev"], xs_i["base_ang_vel_prev"],
+                                 xs_i["base_pos_z_prev"], xs_i["joint_pos_prev_j"], xs_i["joint_vel_prev_j"],
+                                 tau_feature)
+        new_history_j = jnp.roll(carry["history_j"], -1, axis=0).at[-1].set(feature)
 
-            # --- Inertia matrix / qfrc_bias source ---
-            # CaDeLaC/DeLaN predicts a RESIDUAL correction (base-only, 6x6 / 6-dim),
-            # not the absolute mass matrix/bias -- it's trained on `diff_tau` (the
-            # difference between the true, payload-affected dynamics and the nominal
-            # MuJoCo dynamics), so its output must be ADDED onto the nominal MuJoCo
-            # values, not substituted for them. The nominal values are exactly what
-            # Stage A already precomputed (`leg_odom.env` has no knowledge of the true,
-            # randomized payload mass, so it already IS the nominal/no-payload model,
-            # evaluated at the real joint trajectory) -- no separate MuJoCo query
-            # needed here. Only the base-base block [:6,:6]/[:6] is corrected; the
-            # leg-related coupling stays purely nominal, since CaDeLaC never models it.
-            M_nom = xs_i["M_mujoco"]
-            qfrc_nom = xs_i["qfrc_bias_mujoco"]
-            if cadelac_active:
-                q_in = jnp.concatenate([carry["x"][POS], quat_to_euler(orient, True)])[None, ...]
-                qd_in = jnp.concatenate([carry["x"][LIN_VEL], xs_i["base_ang_vel"]])[None, ...]
-                qdd_src = carry["base_acc_i"] if not use_external_base_acc else xs_i["base_acc_prev"]
-                qdd_in = qdd_src[None, ...]
-                history_in = new_history_j[None, ...]
-                tau_pred, dEdt, extras = model.apply(params, q_in, qd_in, qdd_in, history_in)
-                M_res = extras["M"][0]
-                qfrc_res = extras["qfrc_bias"][0].reshape(-1)
-                inertia_matrix = M_nom.at[:6, :6].add(M_res)
-                qfrc_bias = qfrc_nom.at[:6].add(qfrc_res)
-                # Drop-in slot for the next step's `tau_diff` feature (see above).
-                # Shape/sign/unit correspondence between `tau_pred` and the ground-
-                # truth `tau_diff` it replaces is NOT yet verified -- only reshaped
-                # defensively so this plugs into the (6,) feature slot. Revisit if the
-                # filter behaves oddly once CaDeLaC is active.
-                new_tau_pred_prev = jnp.reshape(tau_pred, (-1,))
-            else:
-                inertia_matrix = M_nom
-                qfrc_bias = qfrc_nom
-                new_tau_pred_prev = carry["tau_pred_prev"]
+        # --- Inertia matrix / qfrc_bias source ---
+        # CaDeLaC/DeLaN predicts a RESIDUAL correction (base-only, 6x6 / 6-dim), not
+        # the absolute mass matrix/bias -- it's trained on `diff_tau` (the difference
+        # between the true, payload-affected dynamics and the nominal MuJoCo
+        # dynamics), so its output must be ADDED onto the nominal MuJoCo values, not
+        # substituted for them. The nominal values are exactly what Stage A already
+        # precomputed (`leg_odom.env` has no knowledge of the true, randomized payload
+        # mass, so it already IS the nominal/no-payload model, evaluated at the real
+        # joint trajectory) -- no separate MuJoCo query needed here. Only the
+        # base-base block [:6,:6]/[:6] is corrected; the leg-related coupling stays
+        # purely nominal, since CaDeLaC never models it.
+        M_nom = xs_i["M_mujoco"]
+        qfrc_nom = xs_i["qfrc_bias_mujoco"]
+        q_in = jnp.concatenate([carry["x"][POS], quat_to_euler(orient, True)])[None, ...]
+        qd_in = jnp.concatenate([carry["x"][LIN_VEL], xs_i["base_ang_vel"]])[None, ...]
+        qdd_src = carry["base_acc_i"] if not use_external_base_acc else xs_i["base_acc_prev"]
+        qdd_in = qdd_src[None, ...]
+        history_in = new_history_j[None, ...]
+        tau_pred, dEdt, extras = model.apply(params, q_in, qd_in, qdd_in, history_in)
+        M_res = extras["M"][0]
+        qfrc_res = extras["qfrc_bias"][0].reshape(-1)
+        inertia_matrix = M_nom.at[:6, :6].add(M_res)
+        qfrc_bias = qfrc_nom.at[:6].add(qfrc_res)
+        # Drop-in slot for the next step's `tau_diff` feature (see above). Shape/sign/
+        # unit correspondence between `tau_pred` and the ground-truth `tau_diff` it
+        # replaces is NOT yet verified -- only reshaped defensively so this plugs into
+        # the (6,) feature slot. Revisit if the filter behaves oddly.
+        new_tau_pred_prev = jnp.reshape(tau_pred, (-1,))
 
-            # --- Contact state ---
-            f_hat_out = None
-            p_hat_new = f_hat_new = f_filtered = None
-            if not use_gm_observer and not use_threshold:
-                c_state = xs_i["contact_states"]
-            elif use_gm_observer:
-                J_w_flat = xs_i["J_w"].reshape(12, -1)
-                p_hat_new, f_hat_new, f_filtered, c_state = gm_observer._step_impl(
-                    carry["p_hat"], carry["f_hat"], carry["f_hat_prev"],
-                    vel=jnp.concatenate([carry["x"][LIN_VEL], xs_i["base_ang_vel"], xs_i["joint_vel"]]),
-                    M=inertia_matrix, joint_torque=xs_i["joint_torque"], J=J_w_flat, qfrc_bias=qfrc_bias)
-                f_hat_out = f_filtered
-            else:  # use_threshold
-                c_state = estimate_contact_states(xs_i["contact_forces"], contact_state_threshold)
+        # --- Contact state ---
+        f_hat_out = None
+        p_hat_new = f_hat_new = f_filtered = None
+        if not use_gm_observer and not use_threshold:
+            c_state = xs_i["contact_states"]
+        elif use_gm_observer:
+            J_w_flat = xs_i["J_w"].reshape(12, -1)
+            p_hat_new, f_hat_new, f_filtered, c_state = gm_observer._step_impl(
+                carry["p_hat"], carry["f_hat"], carry["f_hat_prev"],
+                vel=jnp.concatenate([carry["x"][LIN_VEL], xs_i["base_ang_vel"], xs_i["joint_vel"]]),
+                M=inertia_matrix, joint_torque=xs_i["joint_torque"], J=J_w_flat, qfrc_bias=qfrc_bias)
+            f_hat_out = f_filtered
+        else:  # use_threshold
+            c_state = estimate_contact_states(xs_i["contact_forces"], contact_state_threshold)
 
-            # --- Leg odometry ---
-            new_leg_pos, new_leg_vel = compute_leg_odometry_step_jax(
-                orient_rot, xs_i["base_ang_vel"], xs_i["joint_vel"], xs_i["p_b"],
-                xs_i["J_b"], c_state, dt, carry["leg_pos"])
+        # --- Leg odometry ---
+        new_leg_pos, new_leg_vel = compute_leg_odometry_step_jax(
+            orient_rot, xs_i["base_ang_vel"], xs_i["joint_vel"], xs_i["p_b"],
+            xs_i["J_b"], c_state, dt, carry["leg_pos"])
 
-            # --- Contact force ---
-            if use_external_c_force:
-                c_force = xs_i["contact_forces"]
-            else:
-                c_force = estimate_contact_forces_v2(xs_i["joint_torque"], c_state, xs_i["J_w"], enable_jax=True)
+        # --- Contact force ---
+        if use_external_c_force:
+            c_force = xs_i["contact_forces"]
+        else:
+            c_force = estimate_contact_forces_v2(xs_i["joint_torque"], c_state, xs_i["J_w"], enable_jax=True)
 
-            # --- Base acceleration ---
-            if use_external_base_acc:
-                base_acc_i = xs_i["base_acc"]
-            else:
-                base_acc_i = estimate_acc_from_contact_force_v4(
-                    xs_i["joint_acc"], c_force, c_state, xs_i["p_b"], orient_rot,
-                    inertia_matrix, qfrc_bias, enable_jax=True)
+        # --- Base acceleration ---
+        if use_external_base_acc:
+            base_acc_i = xs_i["base_acc"]
+        else:
+            base_acc_i = estimate_acc_from_contact_force_v4(
+                xs_i["joint_acc"], c_force, c_state, xs_i["p_b"], orient_rot,
+                inertia_matrix, qfrc_bias, enable_jax=True)
 
-            # --- Kalman filter ---
-            A, B = carry["A"], carry["B"]
-            if est_mode == 3:
-                A = KF_JAX._update_A_cf_impl(A, c_state)
-            if est_mode == 4:
-                # inertia_matrix/qfrc_bias are always the full 18x18/18-dim nominal
-                # MuJoCo values (optionally corrected in the base block by CaDeLaC's
-                # residual, see above) -- never a bare 6x6 CaDeLaC-only matrix -- so
-                # the leg-coupling block H_BL is always populated and usable.
-                A, B = KF_JAX._update_AB_impl(dt, A, B, orient_rot, xs_i["p_b"], c_state,
-                                              inertia_matrix, qfrc_bias, use_full_M=True)
-                u = jnp.concatenate([xs_i["joint_acc"], jnp.array([1.0])])
-            else:
-                u = base_acc_i
-            x_pred, P_pred = KF_JAX._predict_impl(A, B, Q_mat, carry["P"], carry["x"], u)
-            if est_mode == 1:
-                z = jnp.concatenate([new_leg_vel, xs_i["base_ang_vel"]])
-            else:
-                z = jnp.concatenate([new_leg_vel, xs_i["base_ang_vel"], c_force.flatten()])
-            x, P = KF_JAX._update_impl(H_mat, R_mat, P_pred, x_pred, z)
+        # --- Kalman filter ---
+        A, B = carry["A"], carry["B"]
+        if est_mode == 3:
+            A = KF_JAX._update_A_cf_impl(A, c_state)
+        if est_mode == 4:
+            # inertia_matrix/qfrc_bias are always the full 18x18/18-dim nominal MuJoCo
+            # values, corrected in the base block by CaDeLaC's residual -- never a bare
+            # 6x6 CaDeLaC-only matrix -- so the leg-coupling block H_BL is always
+            # populated and usable.
+            A, B = KF_JAX._update_AB_impl(dt, A, B, orient_rot, xs_i["p_b"], c_state,
+                                          inertia_matrix, qfrc_bias, use_full_M=True)
+            u = jnp.concatenate([xs_i["joint_acc"], jnp.array([1.0])])
+        else:
+            u = base_acc_i
+        x_pred, P_pred = KF_JAX._predict_impl(A, B, Q_mat, carry["P"], carry["x"], u)
+        if est_mode == 1:
+            z = jnp.concatenate([new_leg_vel, xs_i["base_ang_vel"]])
+        else:
+            z = jnp.concatenate([new_leg_vel, xs_i["base_ang_vel"], c_force.flatten()])
+        x, P = KF_JAX._update_impl(H_mat, R_mat, P_pred, x_pred, z)
 
-            new_carry = {
-                "x": x, "P": P, "A": A, "B": B,
-                "leg_pos": new_leg_pos, "leg_vel": new_leg_vel,
-                "history_j": new_history_j, "history_count": new_history_count,
-                "tau_pred_prev": new_tau_pred_prev,
-            }
-            if not use_external_base_acc:
-                new_carry["base_acc_i"] = base_acc_i
-            if use_gm_observer:
-                new_carry["p_hat"] = p_hat_new
-                new_carry["f_hat"] = f_hat_new
-                new_carry["f_hat_prev"] = f_filtered
+        new_carry = {
+            "x": x, "P": P, "A": A, "B": B,
+            "leg_pos": new_leg_pos, "leg_vel": new_leg_vel,
+            "history_j": new_history_j,
+            "tau_pred_prev": new_tau_pred_prev,
+        }
+        if not use_external_base_acc:
+            new_carry["base_acc_i"] = base_acc_i
+        if use_gm_observer:
+            new_carry["p_hat"] = p_hat_new
+            new_carry["f_hat"] = f_hat_new
+            new_carry["f_hat_prev"] = f_filtered
 
-            ys_i = {
-                "pos_predict": x_pred[POS], "vel_predict": x_pred[LIN_VEL], "ang_vel_predict": x_pred[ANG_VEL],
-                "pos_update": x[POS], "vel_update": x[LIN_VEL], "ang_vel_update": x[ANG_VEL],
-                "leg_odom_vel": new_leg_vel,
-            }
-            if est_mode in (2, 3, 4):
-                ys_i["c_force_predict"] = x_pred[C_FORCE].reshape((4, 3))
-                ys_i["c_force_update"] = x[C_FORCE].reshape((4, 3))
-            if not use_external_c_force:
-                ys_i["c_force_meas"] = c_force
-            if use_gm_observer:
-                ys_i["c_state_est"] = c_state
-                ys_i["f_hat_history"] = f_hat_out
-            if cadelac_active:
-                # "cadelac" here means the corrected (nominal + residual) base block
-                # actually fed into the filter -- comparable in shape/meaning to the
-                # pure-nominal "mujoco" entry, not the raw residual by itself.
-                ys_i["inertia_matrix_mujoco"] = M_nom[:6, :6]
-                ys_i["inertia_matrix_cadelac"] = inertia_matrix[:6, :6]
-                ys_i["qfrc_bias_mujoco"] = qfrc_nom[:6]
-                ys_i["qfrc_bias_cadelac"] = qfrc_bias[:6]
+        ys_i = {
+            "pos_predict": x_pred[POS], "vel_predict": x_pred[LIN_VEL], "ang_vel_predict": x_pred[ANG_VEL],
+            "pos_update": x[POS], "vel_update": x[LIN_VEL], "ang_vel_update": x[ANG_VEL],
+            "leg_odom_vel": new_leg_vel,
+            # "cadelac" here means the corrected (nominal + residual) base block
+            # actually fed into the filter -- comparable in shape/meaning to the
+            # pure-nominal "mujoco" entry, not the raw residual by itself. Populated
+            # every step now, since CaDeLaC is active from step 0 onward.
+            "inertia_matrix_mujoco": M_nom[:6, :6],
+            "inertia_matrix_cadelac": inertia_matrix[:6, :6],
+            "qfrc_bias_mujoco": qfrc_nom[:6],
+            "qfrc_bias_cadelac": qfrc_bias[:6],
+        }
+        if est_mode in (2, 3, 4):
+            ys_i["c_force_predict"] = x_pred[C_FORCE].reshape((4, 3))
+            ys_i["c_force_update"] = x[C_FORCE].reshape((4, 3))
+        if not use_external_c_force:
+            ys_i["c_force_meas"] = c_force
+        if use_gm_observer:
+            ys_i["c_state_est"] = c_state
+            ys_i["f_hat_history"] = f_hat_out
 
-            return new_carry, ys_i
-
-        return step
-
-    step1 = make_step(cadelac_active=False)
-    step2 = make_step(cadelac_active=True)
-
-    @jax.jit
-    def _run_both_phases(carry0, xs1, xs2):
-        carry1, ys1 = jax.lax.scan(step1, carry0, xs1)
-        carry2, ys2 = jax.lax.scan(step2, carry1, xs2)
-        return ys1, ys2
+        return new_carry, ys_i
 
     print("Running state estimation (CaDeLaC, compiled scan)")
-    ys1, ys2 = _run_both_phases(carry0, xs1, xs2)
+    run_scan = jax.jit(lambda carry0, xs: jax.lax.scan(step, carry0, xs))
+    _, ys = run_scan(carry0, xs)
 
-    def cat(field):
-        parts = []
-        if field in ys1:
-            parts.append(ys1[field])
-        if field in ys2:
-            parts.append(ys2[field])
-        return jnp.concatenate(parts, axis=0) if parts else jnp.array([])
+    def get(field):
+        return ys[field] if field in ys else jnp.array([])
 
     result = {
-        "pos_predict": cat("pos_predict"),
-        "vel_predict": cat("vel_predict"),
-        "ang_vel_predict": cat("ang_vel_predict"),
-        "c_force_predict": cat("c_force_predict"),
-        "pos_update": cat("pos_update"),
-        "vel_update": cat("vel_update"),
-        "ang_vel_update": cat("ang_vel_update"),
-        "c_force_update": cat("c_force_update"),
-        "c_force_meas": cat("c_force_meas"),
-        "c_state_est": cat("c_state_est"),
-        "f_hat_history": cat("f_hat_history"),
-        "leg_odom_vel": cat("leg_odom_vel"),
+        "pos_predict": get("pos_predict"),
+        "vel_predict": get("vel_predict"),
+        "ang_vel_predict": get("ang_vel_predict"),
+        "c_force_predict": get("c_force_predict"),
+        "pos_update": get("pos_update"),
+        "vel_update": get("vel_update"),
+        "ang_vel_update": get("ang_vel_update"),
+        "c_force_update": get("c_force_update"),
+        "c_force_meas": get("c_force_meas"),
+        "c_state_est": get("c_state_est"),
+        "f_hat_history": get("f_hat_history"),
+        "leg_odom_vel": get("leg_odom_vel"),
+        "inertia_matrix": {"mujoco": list(ys["inertia_matrix_mujoco"]), "cadelac": list(ys["inertia_matrix_cadelac"])},
+        "qfrc_bias": {"mujoco": list(ys["qfrc_bias_mujoco"]), "cadelac": list(ys["qfrc_bias_cadelac"])},
     }
-    if "inertia_matrix_mujoco" in ys2:
-        result["inertia_matrix"] = {"mujoco": list(ys2["inertia_matrix_mujoco"]),
-                                     "cadelac": list(ys2["inertia_matrix_cadelac"])}
-        result["qfrc_bias"] = {"mujoco": list(ys2["qfrc_bias_mujoco"]),
-                                "cadelac": list(ys2["qfrc_bias_cadelac"])}
-    else:
-        result["inertia_matrix"] = {"mujoco": [], "cadelac": []}
-        result["qfrc_bias"] = {"mujoco": [], "cadelac": []}
 
     return result
