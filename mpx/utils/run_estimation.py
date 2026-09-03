@@ -31,7 +31,9 @@ def run_state_estimation(dt,
                          est_mode=1,
                          cadelac_path=None,
                          tau=None,
-                         tau_nominal=None):
+                         tau_nominal=None,
+                         oracle_M_res=None,
+                         oracle_qfrc_res=None):
     """Run the Kalman Filter state estimation.
 
     est_mode:
@@ -41,13 +43,24 @@ def run_state_estimation(dt,
     - 4 = estimation of pos, lin vel, ang vel and contact force (identity in A) with base acc inside KF
 
     If CaDeLaC path is given, it runs with JAX, else Numpy.
+
+    oracle_M_res / oracle_qfrc_res (nur ohne cadelac_path): wahre Residuen statt eines
+    gelernten Modells -- oracle_M_res (6,6) wird pro Schritt auf den Basisblock der
+    nominalen Traegheitsmatrix addiert, oracle_qfrc_res (N,6) auf qfrc_bias[:6].
+    Gleiche Stellen wie die CaDeLaC-Korrektur im JAX-Pfad (GM-Observer, Beschleunigungs-
+    schaetzung, KF-Update), damit die Leiter Nominal / CaDeLaC / Oracle fair vergleicht.
+    Das ist die Obergrenze dessen, was ein perfektes Netz dem Filter bringen kann.
     """
     if cadelac_path is None:
         return _run_state_estimation_numpy(
             dt=dt, base_orient=base_orient, base_ang_vel=base_ang_vel, joint_pos=joint_pos,
             joint_vel=joint_vel, joint_acc=joint_acc, Q=Q, R=R, base_acc=base_acc, joint_torque=joint_torque, 
             contact_forces=contact_forces, contact_states=contact_states, contact_state_threshold=contact_state_threshold,
-            model_name=model_name, L1=L1, L2=L2, contact_thresholds=contact_thresholds, est_mode=est_mode)
+            model_name=model_name, L1=L1, L2=L2, contact_thresholds=contact_thresholds, est_mode=est_mode,
+            oracle_M_res=oracle_M_res, oracle_qfrc_res=oracle_qfrc_res)
+
+    if oracle_M_res is not None or oracle_qfrc_res is not None:
+        raise ValueError("oracle_M_res/oracle_qfrc_res nur ohne cadelac_path verwenden (entweder Netz oder Oracle).")
 
     return _run_state_estimation_cadelac(
         dt=dt, base_orient=base_orient, base_ang_vel=base_ang_vel, joint_pos=joint_pos,
@@ -61,7 +74,8 @@ def run_state_estimation(dt,
 def _run_state_estimation_numpy(dt, base_orient, base_ang_vel, joint_pos, joint_vel, joint_acc, Q, R,
                                  base_acc, joint_torque, contact_forces,
                                  contact_states, contact_state_threshold, model_name, L1, L2,
-                                 contact_thresholds, est_mode):
+                                 contact_thresholds, est_mode,
+                                 oracle_M_res=None, oracle_qfrc_res=None):
     num_data = len(base_ang_vel)
 
     pos_predict_sim, vel_predict_sim, ang_vel_predict_sim, c_force_predict_sim = [], [], [], []
@@ -84,6 +98,13 @@ def _run_state_estimation_numpy(dt, base_orient, base_ang_vel, joint_pos, joint_
 
         inertia_matrix = get_inertia_matrix(leg_odom.env)
         qfrc_bias = leg_odom.env.mjData.qfrc_bias.copy()
+
+        # Oracle-Residuen: an derselben Stelle addiert wie die CaDeLaC-Korrektur im
+        # JAX-Pfad, VOR allen drei Verwendungen (GM-Observer, Acc-Schaetzung, KF).
+        if oracle_M_res is not None:
+            inertia_matrix[:6, :6] += oracle_M_res
+        if oracle_qfrc_res is not None:
+            qfrc_bias[:6] += oracle_qfrc_res[i]
 
         # --- Contact State ---
         if contact_states is None:
@@ -261,6 +282,13 @@ def _run_state_estimation_cadelac(dt, base_orient, base_ang_vel, joint_pos, join
     nn_config = get_config_from_dict(hyper)
     model = CaDeLaCLogChol(hyper['nv_dof'], nn_config)
     time_window = hyper["time_window"]
+    # The training windows are strided: `time_window` points spaced `history_stride`
+    # samples apart, i.e. a span of time_window*history_stride samples. The ring
+    # buffer below must be advanced at that same rate -- pushing every step would
+    # give the model a window covering only 1/stride of the wall-clock span it was
+    # trained on, which is a different input distribution. Models trained before
+    # this option existed carry no key and default to the old every-step behaviour.
+    history_stride = int(hyper.get("history_stride", 1))
 
     feature_dim = int(params["params"]["lstm"]["lstm_layer_0"]["ii"]["kernel"].shape[0])
 
@@ -368,6 +396,7 @@ def _run_state_estimation_cadelac(dt, base_orient, base_ang_vel, joint_pos, join
         "leg_vel": jnp.zeros(3),
         "history_j": jnp.tile(feature_0[None, :], (time_window, 1)),
         "tau_diff_prev": jnp.zeros(6),
+        "hist_step": jnp.int32(0),
     }
 
     if not use_external_base_acc:
@@ -387,7 +416,13 @@ def _run_state_estimation_cadelac(dt, base_orient, base_ang_vel, joint_pos, join
         feature = build_feature(xs_i["base_orient_prev"], base_vel_prev_i, xs_i["base_ang_vel_prev"],
                                  base_pos_z_prev_i, xs_i["joint_pos_prev_j"], xs_i["joint_vel_prev_j"],
                                  carry["tau_diff_prev"])
-        new_history_j = jnp.roll(carry["history_j"], -1, axis=0).at[-1].set(feature)
+        # Advance only every `history_stride`-th step so the buffer spans the same
+        # wall-clock window as the training data (jnp.where, not a Python branch --
+        # this runs inside lax.scan).
+        rolled_history_j = jnp.roll(carry["history_j"], -1, axis=0).at[-1].set(feature)
+        do_push = (carry["hist_step"] % history_stride) == 0
+        new_history_j = jnp.where(do_push, rolled_history_j, carry["history_j"])
+        new_hist_step = carry["hist_step"] + 1
 
         # nominal inertia matrix, biases and torque from MuJoCo
         M_nom = xs_i["M_mujoco"]
@@ -400,9 +435,13 @@ def _run_state_estimation_cadelac(dt, base_orient, base_ang_vel, joint_pos, join
         qdd_src = carry["base_acc_i"] if not use_external_base_acc else xs_i["base_acc"]
         qdd_in = qdd_src[None, ...]
         history_in = new_history_j[None, ...]
-        tau_pred, _, extras = model.apply(params, q_in, qd_in, qdd_in, history_in)
+
+        # residual predictions
+        tau_diff_pred, _, extras = model.apply(params, q_in, qd_in, qdd_in, history_in)
         M_res = extras["M"][0]
         qfrc_res = extras["qfrc_bias"][0].reshape(-1)
+
+        # true_value = residual + nominal
         inertia_matrix = M_nom.at[:6, :6].add(M_res)
         qfrc_bias = qfrc_nom.at[:6].add(qfrc_res)
 
@@ -461,7 +500,8 @@ def _run_state_estimation_cadelac(dt, base_orient, base_ang_vel, joint_pos, join
             "x": x, "P": P, "A": A, "B": B,
             "leg_pos": new_leg_pos, "leg_vel": new_leg_vel,
             "history_j": new_history_j,
-            "tau_diff_prev": tau_i - tau_nom
+            "tau_diff_prev": tau_i - tau_nom,
+            "hist_step": new_hist_step,
         }
         if not use_external_base_acc:
             new_carry["base_acc_i"] = base_acc_i
@@ -474,11 +514,15 @@ def _run_state_estimation_cadelac(dt, base_orient, base_ang_vel, joint_pos, join
             "pos_predict": x_pred[POS], "vel_predict": x_pred[LIN_VEL], "ang_vel_predict": x_pred[ANG_VEL],
             "pos_update": x[POS], "vel_update": x[LIN_VEL], "ang_vel_update": x[ANG_VEL],
             "leg_odom_vel": new_leg_vel,
-            "inertia_matrix_mujoco": M_nom[:6, :6],
-            "inertia_matrix_cadelac": inertia_matrix[:6, :6],
-            "qfrc_bias_mujoco": qfrc_nom[:6],
-            "qfrc_bias_cadelac": qfrc_bias[:6],
-            "tau_pred": tau_pred
+            # nominal = payload-free MuJoCo model, residual = raw network output,
+            # corrected = what the filter actually uses (nominal + residual).
+            "inertia_matrix_nominal": M_nom[:6, :6],
+            "inertia_matrix_residual": M_res,
+            "inertia_matrix_corrected": inertia_matrix[:6, :6],
+            "qfrc_bias_nominal": qfrc_nom[:6],
+            "qfrc_bias_residual": qfrc_res,
+            "qfrc_bias_corrected": qfrc_bias[:6],
+            "tau_diff_pred": tau_diff_pred
         }
         if est_mode in (2, 3, 4):
             ys_i["c_force_predict"] = x_pred[C_FORCE].reshape((4, 3))
@@ -511,9 +555,17 @@ def _run_state_estimation_cadelac(dt, base_orient, base_ang_vel, joint_pos, join
         "c_state_est": get("c_state_est"),
         "f_hat_history": get("f_hat_history"),
         "leg_odom_vel": get("leg_odom_vel"),
-        "inertia_matrix": {"mujoco": list(ys["inertia_matrix_mujoco"]), "cadelac": list(ys["inertia_matrix_cadelac"])},
-        "qfrc_bias": {"mujoco": list(ys["qfrc_bias_mujoco"]), "cadelac": list(ys["qfrc_bias_cadelac"])},
-        "tau_pred": get("tau_pred")
+        # "nominal"   = payload-free MuJoCo model
+        # "residual"  = raw network output M~(z) / b~(z), i.e. the payload alone
+        # "corrected" = nominal + residual, the dynamics the filter actually runs on
+        "inertia_matrix": {"nominal": list(ys["inertia_matrix_nominal"]),
+                           "residual": list(ys["inertia_matrix_residual"]),
+                           "corrected": list(ys["inertia_matrix_corrected"])},
+        "qfrc_bias": {"nominal": list(ys["qfrc_bias_nominal"]),
+                      "residual": list(ys["qfrc_bias_residual"]),
+                      "corrected": list(ys["qfrc_bias_corrected"])},
+        "tau_diff_pred": get("tau_diff_pred"),
+        "hyper": hyper
     }
 
     return result
