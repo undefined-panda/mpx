@@ -38,11 +38,26 @@ robot_leg_joints = dict(FR=['FR_hip_joint', 'FR_thigh_joint', 'FR_calf_joint', ]
 mpc_frequency = config.mpc_frequency
 state_observables_names = tuple(QuadrupedEnv.ALL_OBS)  # return all available state observables
 
-# REPRODUCIBILITY: dedicated RNG for base-mass and command-velocity sampling, so a
+# REPRODUCIBILITY: dedicated RNGs for base-mass and command-velocity sampling, so a
 # run can be replayed exactly by reusing the same SEED (independent of any other
 # library touching the global numpy random state).
+#
+# CROSSED DESIGN: a payload and a command are each still sampled exactly once per
+# run, before the run starts, same as before -- nothing about how the robot moves
+# during a run changes. What changes is which pairs occur. Before, num_simulations
+# payloads and num_simulations commands were drawn 1:1, so every run's command
+# sequence was a unique fingerprint of its payload -- a network could match a test
+# run to its nearest training run by kinematics alone and read off that run's mass,
+# with no floor on how well that "shortcut" fits (0.000 kg training error measured
+# on this dataset), while carrying zero information about unseen payloads. Drawing
+# a small pool of commands once and reusing it identically across every payload
+# makes payload statistically independent of the command signature by construction:
+# every command occurs at every mass equally often, so the signature alone predicts
+# nothing and the network can only lower its training loss by extracting genuine
+# torque physics from the window.
 SEED = 0
-rng = np.random.default_rng(SEED)
+rng_payload = np.random.default_rng(SEED)
+rng_cmd = np.random.default_rng(SEED + 10_000)
 
 # Initialize simulation environment
 sim_frequency = 200.0
@@ -349,7 +364,7 @@ custom_dataset = {"dt":[],
                   "contact_pos_des":[]
                   }
 
-num_simulations = 25
+num_simulations = 50
 max_steps = 1000
 q_init = env.mjData.qpos.copy()
 dq_init = env.mjData.qvel.copy()
@@ -361,22 +376,52 @@ old_dt = 0
 
 height_limit = 0.25 # re-do run when height is below this value (indicating robot fell)
 
+# CROSSED DESIGN continued: n_payloads * n_cmds == num_simulations, so the run
+# count and the "1000 points per run" structure below are completely unchanged --
+# only which (payload, command) pair drives which run index is now planned ahead
+# of time instead of drawn 1:1. 5x5 = 25 keeps today's num_simulations exactly.
+n_payloads = 10
+n_cmds = num_simulations // n_payloads
+assert n_payloads * n_cmds == num_simulations, \
+    "n_payloads must divide num_simulations for a full crossed design"
+
+# Commands drawn ONCE, up front, then reused identically for every payload --
+# this is the step that removes the payload<->command bijection.
+command_pool = [
+    (rng_cmd.uniform(-0.5, 1), rng_cmd.uniform(-0.1, 0.1), rng_cmd.uniform(-0.5, 0.5))
+    for _ in range(n_cmds)
+]
+# (payload_id, cmd_id) for every run, payload-major so all commands are exhausted
+# for payload 0 before payload 1 starts -- irrelevant for the statistics (every
+# pair occurs exactly once either way), only affects the order runs are simulated in.
+run_specs = [(p, c) for p in range(n_payloads) for c in range(n_cmds)]
+payload_cache = {}  # payload_id -> sampled (base_mass, base_inertia_diag, base_iquat, base_ipos)
+
 sim_num = 0
+failed_runs = []  # run indices that never survived; dropped before saving
 MAX_ATTEMPTS_PER_RUN = 5
 while sim_num < num_simulations:
     # ADDED BY ME: reset environment after each simulation
     if not env.viewer.is_running():
         break
 
+    payload_id, cmd_id = run_specs[sim_num]
+
     for attempt in range(MAX_ATTEMPTS_PER_RUN):
         env.reset(qpos=q_init, qvel=dq_init, random=False)
 
-        # ADDED BY ME: sample a new base mass + spatial inertia for this simulation run
-        base_mass, base_inertia_diag, base_iquat, base_ipos = sample_base_spatial_inertia(
-            env, nominal_base_mass, nominal_base_inertia, nominal_base_iquat, nominal_base_ipos,
-            base_mass_offset_range, inertia_density_offset_range,
-            rotation_offset_range, ipos_offset_range, rng)
-        print(f"Sampled base mass: {base_mass:.3f} kg base_inertia_diag: {base_inertia_diag} base_iquat: {base_iquat} base_ipos: {base_ipos}")
+        # Sample this payload once, on its first occurrence, then reuse it verbatim
+        # across all n_cmds runs that share payload_id -- a retry after a fall must
+        # NOT redraw the payload, or the crossed design breaks (the same payload_id
+        # would then map to two different actual masses across its runs).
+        if payload_id not in payload_cache:
+            payload_cache[payload_id] = sample_base_spatial_inertia(
+                env, nominal_base_mass, nominal_base_inertia, nominal_base_iquat, nominal_base_ipos,
+                base_mass_offset_range, inertia_density_offset_range,
+                rotation_offset_range, ipos_offset_range, rng_payload)
+        base_mass, base_inertia_diag, base_iquat, base_ipos = payload_cache[payload_id]
+        print(f"Run {sim_num} (payload {payload_id}, cmd {cmd_id}): base mass: {base_mass:.3f} kg "
+              f"base_inertia_diag: {base_inertia_diag} base_iquat: {base_iquat} base_ipos: {base_ipos}")
 
         # ADDED BY ME: scratch model/data for compute_tau_components, created once per
         # simulation run (after the spatial-inertia randomization above, so they
@@ -388,10 +433,9 @@ while sim_num < num_simulations:
         tau = jnp.zeros(config.n_joints)
         env.render()
 
-        # ADDED BY ME: make the robot move on its own by sampling linear velocity and angular velocity for each simulation
-        vx = rng.uniform(-0.5, 1)
-        vy = rng.uniform(-0.1, 0.1)
-        az = rng.uniform(-0.5, 0.5)
+        # Command for this run comes from the pre-drawn pool, not a fresh sample --
+        # same value every time this cmd_id recurs across different payloads.
+        vx, vy, az = command_pool[cmd_id]
 
         ref_base_lin_vel = np.array([vx, vy, 0.])
         ref_base_ang_vel = np.array([0, 0, az])
@@ -481,11 +525,23 @@ while sim_num < num_simulations:
             sim_num += 1
             break
     else:
-        print(f"WARNING: Sim {sim_num+1} failed after {MAX_ATTEMPTS_PER_RUN} attempts")
+        # Never leave the slot empty: save_dataset() np.stack()s every key, and an
+        # empty run would crash it. Record the failure and drop the slot at save time.
+        print(f"WARNING: Sim {sim_num+1} (payload {payload_id}, cmd {cmd_id}) failed "
+              f"after {MAX_ATTEMPTS_PER_RUN} attempts -- run will be dropped")
+        failed_runs.append(sim_num)
         sim_num += 1
 
     print(f"\n----- Simulation {sim_num} finished -----\n")
 
 env.close()
+
+if failed_runs:
+    # Dropping runs unbalances the crossed design (that payload is then seen with
+    # fewer commands) -- check how many failures cluster on the heavy payloads.
+    print(f"WARNING: dropping failed runs {failed_runs} before saving "
+          f"({num_simulations - len(failed_runs)}/{num_simulations} runs kept)")
+    for k in custom_dataset:
+        custom_dataset[k] = [r for i, r in enumerate(custom_dataset[k]) if i not in failed_runs]
 
 if log_and_save: save_dataset(custom_dataset, dataset_path) # ADDED BY ME: save dataset of simulations
