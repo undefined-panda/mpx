@@ -26,11 +26,11 @@ from utils.evaluate import evaluate_dataset
 # Reihenfolge = Leiter von "keine Dynamik" bis "perfekte Dynamik"
 VARIANTS = ["leg_odom", "nominal", "cadelac", "oracle"]
 LABELS = {
-    "leg_odom": "Leg-Odometrie (roh)",
-    "nominal": "KF + Nominalmodell",
+    "leg_odom": "Leg odometry (raw)",
+    "nominal": "KF + nominal",
     "cadelac": "KF + CaDeLaC",
-    "oracle": "KF + Oracle (wahre Residuen)",
-    "gt": "Ground Truth",
+    "oracle": "KF + oracle (true residuals)",
+    "gt": "Ground truth",
 }
 COLORS = {
     "leg_odom": "tab:gray",
@@ -111,7 +111,7 @@ def _timeseries_figure(t, gt, series, title, ylabels, name, save_dir):
         ax.grid(alpha=0.3)
     axes[0].set_title(title)
     axes[0].legend(loc="upper right", fontsize=8, ncol=2)
-    axes[-1].set_xlabel("Zeit [s]")
+    axes[-1].set_xlabel("Time [s]")
     fig.tight_layout()
     _save(fig, save_dir, name)
     return fig
@@ -122,7 +122,7 @@ def plot_state_comparison(data, ladder, sim_label="", save_dir=None):
 
     Erzeugt vier Figuren: lineare Geschwindigkeit (inkl. roher Leg-Odometrie),
     Winkelgeschwindigkeit, Position (startwert-bereinigt, wie die Driftmetrik)
-    und Kontaktkraft Fz pro Bein.
+    und Kontaktkraefte (4 Beine x 3 Komponenten).
     """
     t = np.asarray(data["time"]) - float(data["time"][0])
     figs = {}
@@ -133,14 +133,14 @@ def plot_state_comparison(data, ladder, sim_label="", save_dir=None):
     series["leg_odom"] = np.asarray(any_result["leg_odom_vel"])
     figs["vel"] = _timeseries_figure(
         t, np.asarray(data["base_vel"]), series,
-        f"Lineare Geschwindigkeit {sim_label}",
+        f"Linear velocity {sim_label}",
         ["$v_x$ [m/s]", "$v_y$ [m/s]", "$v_z$ [m/s]"], f"vel{sim_label}", save_dir)
 
     # --- Winkelgeschwindigkeit ---
     series = {v: np.asarray(r["ang_vel_update"]) for v, r in ladder.items()}
     figs["ang_vel"] = _timeseries_figure(
         t, np.asarray(data["base_ang_vel"]), series,
-        f"Winkelgeschwindigkeit {sim_label}",
+        f"Angular velocity {sim_label}",
         ["$\\omega_x$ [rad/s]", "$\\omega_y$ [rad/s]", "$\\omega_z$ [rad/s]"],
         f"ang_vel{sim_label}", save_dir)
 
@@ -150,30 +150,46 @@ def plot_state_comparison(data, ladder, sim_label="", save_dir=None):
     for v, r in ladder.items():
         p = np.asarray(r["pos_update"]); series[v] = p - p[0]
     figs["pos"] = _timeseries_figure(
-        t, gt_pos, series, f"Position (relativ zum Start) {sim_label}",
+        t, gt_pos, series, f"Position {sim_label}",
         ["$x$ [m]", "$y$ [m]", "$z$ [m]"], f"pos{sim_label}", save_dir)
 
-    # --- Kontaktkraft Fz pro Bein ---
-    gt_fz = np.asarray(data["contact_forces"])[:, :, 2]          # (N, 4)
-    fig, axes = plt.subplots(4, 1, figsize=(11, 9), sharex=True)
+    # --- Kontaktkraefte: 4 Beine x 3 Kraftkomponenten (Layout wie
+    # force_estimation_plot in plot_data.py), alle Leiter-Varianten uebereinander.
+    # Der RMSE im Subplot-Titel ist ueber den ganzen Lauf gerechnet, nicht nur ueber
+    # das gezeigte Fenster -- und pro Variante, damit die Sprossen vergleichbar sind.
+    gt_f = np.asarray(data["contact_forces"]).reshape(len(t), 4, 3)   # (N, 4, 3)
+    est_f = {}
+    for v in VARIANTS:
+        if v in ladder:
+            cf = np.asarray(ladder[v]["c_force_update"])
+            if cf.size:
+                est_f[v] = cf.reshape(len(t), 4, 3)
+
+    force_labels = ["x", "y", "z"]
+    fig, axes = plt.subplots(4, 3, figsize=(16, 11), sharex=True, constrained_layout=True)
     for leg in range(4):
-        ax = axes[leg]
-        ax.plot(t, gt_fz[:, leg], color=COLORS["gt"], lw=1.4, label=LABELS["gt"])
-        for v in VARIANTS:
-            if v in ladder:
-                cf = np.asarray(ladder[v]["c_force_update"])
-                if cf.size == 0:
-                    continue
-                ax.plot(t, cf.reshape(len(t), 4, 3)[:, leg, 2], color=COLORS[v],
-                        lw=1.0, alpha=0.85, label=LABELS[v])
-        ax.set_ylabel(f"Bein {leg}\n$F_z$ [N]")
-        ax.grid(alpha=0.3)
-    axes[0].set_title(f"Kontaktkraft $F_z$ {sim_label}")
-    axes[0].legend(loc="upper right", fontsize=8, ncol=2)
-    axes[-1].set_xlabel("Zeit [s]")
-    fig.tight_layout()
-    _save(fig, save_dir, f"contact_fz{sim_label}")
-    figs["contact_fz"] = fig
+        for comp in range(3):
+            ax = axes[leg, comp]
+            ax.plot(t, gt_f[:, leg, comp], color=COLORS["gt"], lw=1.4, label=LABELS["gt"])
+            rmse_txt = []
+            for v, arr in est_f.items():
+                ax.plot(t, arr[:, leg, comp], color=COLORS[v], lw=1.0, alpha=0.85,
+                        label=LABELS[v])
+                rmse = float(np.sqrt(np.mean((arr[:, leg, comp] - gt_f[:, leg, comp]) ** 2)))
+                rmse_txt.append(f"{LABELS[v].replace('KF + ', '')} {rmse:.2f}")
+            # ax.set_title(f"leg {leg + 1} - {force_labels[comp]}"
+            #              + (f" | RMSE: {', '.join(rmse_txt)}" if rmse_txt else ""),
+            #              fontsize=8)
+            ax.set_title(f"leg {leg + 1} - {force_labels[comp]}", fontsize=8)
+            ax.set_ylabel(f"leg {leg + 1} - $F_{force_labels[comp]}$ [N]", fontsize=8)
+            ax.grid(alpha=0.3)
+            ax.tick_params(labelsize=8)
+    axes[0, 0].legend(loc="upper right", fontsize=7)
+    for comp in range(3):
+        axes[-1, comp].set_xlabel("Time [s]")
+    fig.suptitle(f"Contact forces {sim_label}", fontsize=13)
+    _save(fig, save_dir, f"contact_f{sim_label}")
+    figs["contact_f"] = fig
 
     return figs
 

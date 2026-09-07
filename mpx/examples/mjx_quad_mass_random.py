@@ -495,9 +495,13 @@ while sim_num < num_simulations:
                         counter += 1
 
                 start = timer()
-                tau, q, dq = mpc.run(qpos,qvel,input,contact_states,base_mass=base_mass,
-                                    base_inertia_diag=base_inertia_diag,base_iquat=base_iquat,
-                                    base_ipos=base_ipos)
+                # MPC deliberately runs on the NOMINAL model (kwargs omitted ->
+                # mpc_wrapper falls back to nominal_base_mass): in deployment the
+                # controller does not know the payload either, and handing it the
+                # true mass lets it compensate the payload perfectly -- which
+                # imprints the payload into the gait kinematics (a run-identity
+                # fingerprint for the network) and is a sim-to-deployment mismatch.
+                tau, q, dq = mpc.run(qpos,qvel,input,contact_states)
                 stop = timer()
                 #print("Time taken for MPC: ", stop-start)
 
