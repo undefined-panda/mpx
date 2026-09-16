@@ -19,3 +19,4 @@ custom_datasets/
 *.txt
 trained_models/
 figures/
+*_old.*

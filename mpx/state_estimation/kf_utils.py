@@ -1,5 +1,8 @@
 import numpy as np
 import mujoco
+from mujoco import mjx
+import jax
+import jax.numpy as jnp
 
 def load_custom_dataset(dataset_path, sim_num=None, print_keys=False):
     dataset = np.load(dataset_path)
@@ -82,7 +85,28 @@ def get_jacobian(env, orient, joint_pos, joint_vel, lin_vel, ang_vel):
     lin_jacobian_b = env.feet_jacobians(frame="base")
     lin_jacobian_w = env.feet_jacobians(frame="world")
 
-    return lin_jacobian_b, lin_jacobian_w
+    J_b = np.stack([lin_jacobian_b[leg] for leg in env.legs_order])
+    J_w = np.stack([lin_jacobian_w[leg] for leg in env.legs_order])
+    return J_b, J_w
+
+def get_jacobian_mjx(mjx_model, orient, joint_pos, joint_vel, 
+                     lin_vel, ang_vel, foot_geom_ids, foot_body_ids):
+    qpos = jnp.concatenate([jnp.zeros(3), orient, joint_pos])
+    qvel = jnp.concatenate([lin_vel, ang_vel, joint_vel])
+    mjx_data = mjx.make_data(mjx_model).replace(qpos=qpos, qvel=qvel)
+    mjx_data = mjx.forward(mjx_model, mjx_data)
+
+    # jacobian per feet
+    def one_foot(geom_id, body_id):
+        jacp, _ = mjx.jac(mjx_model, mjx_data, mjx_data.geom_xpos[geom_id], body_id)
+        return jacp.T
+    J_w = jax.vmap(one_foot)(foot_geom_ids, foot_body_ids)
+
+    # in base frame: R_wb^T @ J_w
+    R_wb = mjx_data.xmat[1].reshape(3, 3)
+    J_b = R_wb.T @ J_w
+
+    return J_b, J_w, mjx_data
 
 def get_inertia_matrix(env):
     M = np.zeros((env.mjModel.nv, env.mjModel.nv)) # shape == (18, 18)
@@ -90,19 +114,22 @@ def get_inertia_matrix(env):
 
     return M
 
-def quat_to_rot(orient):
+def get_inertia_matrix_mjx(mjx_model, data):
+    return mjx.full_m(mjx_model, data)
+
+def quat_to_rot(orient, xp=np):
     """Convert quaternion to rotation matrix (source: https://cookierobotics.com/080/).
     """
 
     w, x, y, z = orient
-    row0 = np.stack([2*(w**2 + x**2) - 1, 2*(x*y - w*z)      , 2*(w*y + x*z)      ])
-    row1 = np.stack([2*(x*y + w*z)      , 2*(w**2 + y**2) - 1, 2*(y*z - w*x)      ])
-    row2 = np.stack([2*(x*z - w*y)      , 2*(y*z + w*x)      , 2*(w**2 + z**2) - 1])
-    R = np.stack([row0, row1, row2])
+    row0 = xp.stack([2*(w**2 + x**2) - 1, 2*(x*y - w*z)      , 2*(w*y + x*z)      ])
+    row1 = xp.stack([2*(x*y + w*z)      , 2*(w**2 + y**2) - 1, 2*(y*z - w*x)      ])
+    row2 = xp.stack([2*(x*z - w*y)      , 2*(y*z + w*x)      , 2*(w**2 + z**2) - 1])
+    R = xp.stack([row0, row1, row2])
 
     return R
 
-def rot_to_quat(orient):
+def rot_to_quat(orient, xp=np):
     """Convert rotation matrix to quaternion (Shepherd's method, numerically robust).
     """
 
@@ -110,42 +137,40 @@ def rot_to_quat(orient):
     trace = R[0,0] + R[1,1] + R[2,2]
 
     if trace > 0:
-        s = 0.5 / np.sqrt(trace + 1.0)
-        return np.array([0.25 / s,
+        s = 0.5 / xp.sqrt(trace + 1.0)
+        return xp.array([0.25 / s,
                          (R[2,1] - R[1,2]) * s,
                          (R[0,2] - R[2,0]) * s,
                          (R[1,0] - R[0,1]) * s])
     elif R[0,0] > R[1,1] and R[0,0] > R[2,2]:
-        s = 2.0 * np.sqrt(1.0 + R[0,0] - R[1,1] - R[2,2])
-        return np.array([(R[2,1] - R[1,2]) / s,
+        s = 2.0 * xp.sqrt(1.0 + R[0,0] - R[1,1] - R[2,2])
+        return xp.array([(R[2,1] - R[1,2]) / s,
                          0.25 * s,
                          (R[0,1] + R[1,0]) / s,
                          (R[0,2] + R[2,0]) / s])
     elif R[1,1] > R[2,2]:
-        s = 2.0 * np.sqrt(1.0 + R[1,1] - R[0,0] - R[2,2])
-        return np.array([(R[0,2] - R[2,0]) / s,
+        s = 2.0 * xp.sqrt(1.0 + R[1,1] - R[0,0] - R[2,2])
+        return xp.array([(R[0,2] - R[2,0]) / s,
                          (R[0,1] + R[1,0]) / s,
                          0.25 * s,
                          (R[1,2] + R[2,1]) / s])
     else:
-        s = 2.0 * np.sqrt(1.0 + R[2,2] - R[0,0] - R[1,1])
-        return np.array([(R[1,0] - R[0,1]) / s,
+        s = 2.0 * xp.sqrt(1.0 + R[2,2] - R[0,0] - R[1,1])
+        return xp.array([(R[1,0] - R[0,1]) / s,
                          (R[0,2] + R[2,0]) / s,
                          (R[1,2] + R[2,1]) / s,
                          0.25 * s])
 
-def convert_orient(orient):
+def convert_orient(orient, xp=np):
     """Return orient as quaternion ans rotation matrix.
     """
     if orient.shape == (4,):
-        return orient, quat_to_rot(orient)
+        return orient, quat_to_rot(orient, xp)
     else:
-        return rot_to_quat(orient), orient
+        return rot_to_quat(orient, xp), orient
 
-def skew(w):
+def skew(w, xp=np):
     w1, w2, w3 = w
-    w_skew = np.array([[0, -w3, w2],
-                       [w3, 0, -w1],
-                       [-w2, w1, 0]])
-
-    return w_skew
+    return xp.array([[0, -w3, w2],
+                     [w3, 0, -w1],
+                     [-w2, w1, 0]])

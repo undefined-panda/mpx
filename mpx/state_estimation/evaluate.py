@@ -74,30 +74,34 @@ def evaluate_estimation(result, data, print_metrics=True, plot_results=True):
     legs_order = result["legs_order"]
 
     # add other state parameters
-    ang_vel_est = np.asarray(result["ang_vel_update"])
-    if len(ang_vel_est) > 0:
-        state_results["Angular Velocity"] = {"unit": "rad/s", "gt": data["base_ang_vel"], "est": result["ang_vel_update"]}
+    if result.get("ang_vel_update") is not None:
+        ang_vel_est = np.asarray(result["ang_vel_update"])
+        if len(ang_vel_est) > 0:
+            state_results["Angular Velocity"] = {"unit": "rad/s", "gt": data["base_ang_vel"], "est": result["ang_vel_update"]}
 
-    cf_est = np.asarray(result["contact_force_update"]) # (N, 12)
-    if len(cf_est) > 0:
-        cf_gt  = np.asarray(data["contact_forces"]) # (N, 4, 3)
-        for i, leg in enumerate(legs_order):
-            state_results[f"Contact Force {leg}"] = {"unit": "N", "gt": cf_gt[:, i, :], "est": cf_est[:, i*3:(i+1)*3]}
+    if result.get("contact_force_update") is not None:
+        cf_est = np.asarray(result["contact_force_update"]) # (N, 12)
+        if len(cf_est) > 0:
+            cf_gt  = np.asarray(data["contact_forces"]) # (N, 4, 3)
+            for i, leg in enumerate(legs_order):
+                state_results[f"Contact Force {leg}"] = {"unit": "N", "gt": cf_gt[:, i, :], "est": cf_est[:, i*3:(i+1)*3]}
 
     # log base acc estimation
     dynamics_results = {}
-    base_acc_est = np.asarray(result["base_acc_est"])
-    if len(base_acc_est) > 0:
-        dynamics_results["Linear Acceleration"] = {"unit": "m/s^2", "gt": data["base_acc"][:, :3], "est": result["base_acc_est"][:, :3]}
-        if base_acc_est.shape[1] == 6:
-            dynamics_results["Angular Acceleration"] = {"unit": "m/s^2", "gt": data["base_acc"][:, 3:], "est": result["base_acc_est"][:, 3:]}
+    if result.get("base_acc_est") is not None:
+        base_acc_est = np.asarray(result["base_acc_est"])
+        if len(base_acc_est) > 0:
+            dynamics_results["Linear Acceleration"] = {"unit": "m/s^2", "gt": data["base_acc"][:, :3], "est": result["base_acc_est"][:, :3]}
+            if base_acc_est.shape[1] == 6:
+                dynamics_results["Angular Acceleration"] = {"unit": "m/s^2", "gt": data["base_acc"][:, 3:], "est": result["base_acc_est"][:, 3:]}
 
     cs_est_results = {}
-    cs_est = np.asarray(result["contact_state_est"])
-    if len(cs_est) > 0:
-        cs_gt = np.asarray(data["contact_states"])
-        for i, leg in enumerate(legs_order):
-            cs_est_results[leg] = {"gt": cs_gt[:, i], "est": cs_est[:, i]}
+    if result.get("contact_state_est") is not None:
+        cs_est = np.asarray(result["contact_state_est"])
+        if len(cs_est) > 0:
+            cs_gt = np.asarray(data["contact_states"])
+            for i, leg in enumerate(legs_order):
+                cs_est_results[leg] = {"gt": cs_gt[:, i], "est": cs_est[:, i]}
 
     if print_metrics:
         # RMSE
