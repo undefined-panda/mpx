@@ -17,3 +17,6 @@ mjx_quad_original.py
 quad_slam_old.ipynb
 custom_datasets/
 *.txt
+trained_models/
+figures/
+*_old.*
