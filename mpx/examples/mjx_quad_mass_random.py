@@ -365,7 +365,7 @@ custom_dataset = {"dt":[],
                   }
 
 num_simulations = 50
-max_steps = 1000
+max_steps = 2000
 q_init = env.mjData.qpos.copy()
 dq_init = env.mjData.qvel.copy()
 

@@ -13,12 +13,12 @@ def estimate_contact_forces(joint_torque, contact_states, jacobians, legs_order,
 
 def _get_base_acc(orient, joint_acc, contact_force, contact_state,
                   p_b, mass, inertia_matrix, qfrc_bias,
-                  base_acc_est_type, mass_est, xp=np):
+                  base_acc_est_type, xp=np):
     match base_acc_est_type:
         case "Newton":
             base_acc = compute_base_acc_newton_euler(mass, contact_state, contact_force, xp=xp)
         case "Rigid-Body-Dynamics":
-            base_acc = compute_base_acceleration_full_dynamics(joint_acc, contact_force, contact_state, p_b, orient, inertia_matrix, qfrc_bias, not mass_est, xp)
+            base_acc = compute_base_acceleration_full_dynamics(joint_acc, contact_force, contact_state, p_b, orient, inertia_matrix, qfrc_bias, xp)
         case _:
             raise ValueError(f"Unknown base acc estimation type: {base_acc_est_type}")
 
@@ -35,7 +35,7 @@ def compute_base_acc_newton_euler(mass, contact_states, contact_forces, g=9.81, 
 
     return (total_force - gravity) / mass
 
-def compute_base_acceleration_full_dynamics(joint_acc, contact_force, contact_state, contact_pos_b, orient, M, qfrc_bias, include_coupling=True, xp=np):
+def compute_base_acceleration_full_dynamics(joint_acc, contact_force, contact_state, contact_pos_b, orient, M, qfrc_bias, xp=np):
     """Estimate base linear and angular acceleration from floating-base rigid-body dynamics.
     """
     contact_state = xp.asarray(contact_state)
@@ -48,8 +48,10 @@ def compute_base_acceleration_full_dynamics(joint_acc, contact_force, contact_st
     H_B = M[:6, :6] # base inertia matrix
     H_BL = M[:6, 6:18] # coupling between base and legs
 
-    coupling = xp.zeros(6) # 6x6 Base-only (CaDeLaC): no leg-coupling
-    if include_coupling: coupling = H_BL @ joint_acc # full 18x18-inertia (MuJoCo)        
+    if H_BL.shape[1] > 6: # full 18x18-inertia (MuJoCo)
+        coupling = H_BL @ joint_acc
+    else: # 6x6 Base-only (CaDeLaC): no leg-coupling
+        coupling = xp.zeros(6)      
 
     rhs = -coupling - qfrc_bias[:6] + force
     return xp.linalg.solve(H_B, rhs)

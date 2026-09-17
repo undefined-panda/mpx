@@ -174,3 +174,50 @@ def skew(w, xp=np):
     return xp.array([[0, -w3, w2],
                      [w3, 0, -w1],
                      [-w2, w1, 0]])
+
+def quat_to_euler(orient, xp=np):
+    """Convert quaternion [w, x, y, z] to Euler angles [roll, pitch, yaw] (ZYX / XYZ intrinsic).
+
+    Args:
+        orient (array-like): quaternion in [w, x, y, z] format
+        enable_jax (bool): use jax.numpy if True, else numpy
+
+    Returns:
+        array of shape (3,): [roll, pitch, yaw] in radians
+    """
+    w, x, y, z = orient
+
+    # roll (x-axis rotation)
+    sinr_cosp = 2.0 * (w * x + y * z)
+    cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
+    roll = xp.arctan2(sinr_cosp, cosr_cosp)
+
+    # pitch (y-axis rotation); clip to handle numerical noise at the poles
+    sinp = 2.0 * (w * y - z * x)
+    sinp = xp.clip(sinp, -1.0, 1.0)
+    pitch = xp.arcsin(sinp)
+
+    # yaw (z-axis rotation)
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    yaw = xp.arctan2(siny_cosp, cosy_cosp)
+
+    return xp.array([roll, pitch, yaw])
+
+def build_feature_vector(*args):
+    return jnp.concatenate([jnp.atleast_1d(jnp.asarray(a)) for a in args])
+
+def build_feature(feature_dim, joint_pos_i, joint_vel_i, tau_diff_i, base_orient_i, base_vel_i, base_ang_vel_i):    
+    match feature_dim:
+        case 30:
+            return build_feature_vector(joint_pos_i, joint_vel_i, tau_diff_i) 
+        case 16:
+            return build_feature_vector(base_orient_i, base_vel_i, base_ang_vel_i, tau_diff_i) 
+        case _:
+            raise ValueError(f"Invalid feature dim: {feature_dim}")
+
+def update_history(history, feature, hist_step, stride):
+    """Push feature into history every `stride` steps (FIFO)."""
+    do_push = (hist_step % stride) == 0
+    pushed = jnp.roll(history, -1, axis=0).at[-1].set(feature)
+    return jnp.where(do_push, pushed, history)

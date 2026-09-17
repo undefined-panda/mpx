@@ -1,7 +1,7 @@
 from state_estimation.kalman_filter import KF, KF_JAX
 from tqdm import tqdm
 import numpy as np
-from state_estimation.kf_utils import get_jacobian, get_jacobian_mjx, get_inertia_matrix, get_inertia_matrix_mjx, convert_orient, build_kinematic_model
+from state_estimation.kf_utils import *
 from state_estimation.dynamics import _get_base_acc, estimate_contact_forces, compute_contact_force_dynamics
 from state_estimation.contact_obsever import GMContactObserver
 from state_estimation.leg_odometry import LegOdom
@@ -12,7 +12,6 @@ import jax.numpy as jnp
 from felan.models.cadelan_pot_param import CaDeLaN, get_config_from_dict
 from felan.train import load_model_fn
 import time
-from mujoco import mjx
 
 def run_estimation(dt, 
                    data, 
@@ -94,7 +93,6 @@ def _run_estimation_numpy(dt, data, Q, R, include_ang_vel, include_contact_force
     """
 
     print("Running with Numpy")
-    mass_est = False
 
     A, B, H = build_kinematic_model(dt, include_ang_vel, include_contact_force, base_acc_source)
     kf = KF(dt, A, B, H, Q, R, P0, init_state)
@@ -157,7 +155,7 @@ def _run_estimation_numpy(dt, data, Q, R, include_ang_vel, include_contact_force
             if base_acc_source == "external":
                 base_acc = _get_base_acc(orient_R, joint_acc, contact_force, contact_state,
                                          contact_pos_b, mass, inertia_matrix, qfrc_bias,
-                                         estimate_flags["base_acc_est_type"], mass_est)
+                                         estimate_flags["base_acc_est_type"])
                 base_acc_est.append(base_acc)
                 control_input = base_acc
             else: # internal
@@ -205,8 +203,6 @@ def _run_estimation_jax(dt, data, Q, R, include_ang_vel, include_contact_force, 
     jax.config.update("jax_compilation_cache_dir", "./jax_cache")
     t0 = time.perf_counter()
 
-    mass_est = True
-
     # Kalman Filter
     A, B, H = build_kinematic_model(dt, include_ang_vel, include_contact_force, base_acc_source)
     A, B, H = map(jnp.asarray, (A, B, H))
@@ -221,14 +217,17 @@ def _run_estimation_jax(dt, data, Q, R, include_ang_vel, include_contact_force, 
     mass = leg_odom.env.mjModel.body_mass.sum()
     mjx_model = leg_odom.mjx_model
 
-    orient_quat, orient_R = [], []
+    orient_quat, orient_R, orient_euler = [], [], []
     for orient in data["base_orient"]:
         quat, R = convert_orient(orient)
+        euler = quat_to_euler(orient)
         orient_quat.append(quat)
         orient_R.append(R)
+        orient_euler.append(euler)
 
     data_jax = {"orient_quat": jnp.asarray(orient_quat),
                 "orient_R": jnp.asarray(orient_R),
+                "orient_euler": jnp.asarray(orient_euler),
                 "base_ang_vel": jnp.asarray(data["base_ang_vel"]),
                 "joint_pos": jnp.asarray(data["joint_pos"]),
                 "joint_vel": jnp.asarray(data["joint_vel"]),
@@ -253,16 +252,33 @@ def _run_estimation_jax(dt, data, Q, R, include_ang_vel, include_contact_force, 
         data_jax["contact_states"] = jnp.asarray(data["contact_states"])
 
     if cadelan_path is not None:
+        # tau_diff is the difference between tau from the dataset and tau_nominal
         print("Loading CaDeLaN model")
-        # params, hyper = load_model_fn(cadelan_path.name, cadelan_path.parent)
-        # nn_config = get_config_from_dict(hyper)
-        # model = CaDeLaN(hyper['nv_dof'], nn_config)
-        # time_window = hyper["time_window"]
+        params, hyper = load_model_fn(cadelan_path.name, cadelan_path.parent)
+        nn_config = get_config_from_dict(hyper)
+        model = CaDeLaN(hyper['nv_dof'], nn_config)
+        time_window = hyper["time_window"]
+        history_stride = int(hyper.get("history_stride", 1))
+        if hyper["history_input"] == "joint":
+            feature_dim = 30
+            init_history_vector = build_feature_vector(data["joint_pos"][0], data["joint_vel"][0], jnp.zeros(6))
+        else:
+            feature_dim = 16
+            init_history_vector = build_feature_vector(data["base_orient"][0], data["base_vel"][0], data["base_ang_vel"][0], jnp.zeros(6))
+
+        # initialize history as a buffer with copys of first value, fill it in each step
+        carry0["history"] = jnp.tile(init_history_vector[None, :], (time_window, 1))
+        carry0["hist_step"] = jnp.int32(0)
+        carry0["base_acc"] = jnp.zeros(6)
+
+        data_jax["tau"] = (data["tau_m"]+data["tau_c"]+data["tau_g"])[..., :6]
+        data_jax["tau_nom"] = (data["tau_m_nom"]+data["tau_c_nom"]+data["tau_g_nom"])[..., :6]
 
     def step(carry, xs):
         ang_vel = xs["base_ang_vel"]
         orient_quat = xs["orient_quat"]
         orient_R = xs["orient_R"]
+        orient_euler = xs["orient_euler"]
         joint_pos = xs["joint_pos"]
         joint_vel = xs["joint_vel"]
         joint_acc = xs["joint_acc"]
@@ -273,6 +289,21 @@ def _run_estimation_jax(dt, data, Q, R, include_ang_vel, include_contact_force, 
                                               carry["x"][3:6], ang_vel, leg_odom._foot_geom_ids_j, leg_odom._foot_body_ids_j)
         inertia_matrix = get_inertia_matrix_mjx(mjx_model, mjx_data)
         qfrc_bias = mjx_data.qfrc_bias
+
+        # --- CaDeLaN ---
+        if cadelan_path is not None:
+            q = jnp.concatenate([carry["x"][0:3], orient_euler])[None, ...]
+            qd = jnp.concatenate([carry["x"][3:6], ang_vel])[None, ...]
+            qdd = carry["base_acc"][None, ...]
+            history = carry["history"][None, ...]
+
+            tau_diff_pred, _, extras = model.apply(params, q, qd, qdd, history)
+            M_res = extras["M"][0]
+            qfrc_res = extras["qfrc_bias"][0].reshape(-1)
+
+            # use nominal inertia and bias forces
+            inertia_matrix = inertia_matrix.at[:6, :6].add(M_res)
+            qfrc_bias = qfrc_bias.at[:6].add(qfrc_res)            
 
         # --- Contact State ---
         if not estimate_flags["estimate_contact_state"]:
@@ -305,12 +336,12 @@ def _run_estimation_jax(dt, data, Q, R, include_ang_vel, include_contact_force, 
         # --- Dynamics ---
         A, B = carry["A"], carry["B"]
         if estimate_flags["estimate_base_acc"]:
-            if base_acc_source == "external":
+            if (base_acc_source == "external") or (cadelan_path is not None):
                 base_acc = _get_base_acc(orient_R, joint_acc, contact_force, contact_state,
                                          contact_pos_b, mass, inertia_matrix, qfrc_bias,
-                                         estimate_flags["base_acc_est_type"], mass_est, xp=jnp)
-                control_input = base_acc
-            else: # internal
+                                         estimate_flags["base_acc_est_type"], xp=jnp)
+                control_input = base_acc # gets overwritten for 'internal' + CaDeLaN case, to carry base_acc
+            if base_acc_source == "internal":
                 J_new, coupling, bias = compute_contact_force_dynamics(orient_R, contact_pos_b, contact_state, inertia_matrix, qfrc_bias, xp=jnp)
                 A, B = kf.update_process_model(carry["A"], carry["B"], J_new, coupling, bias)
                 control_input = jnp.concatenate([joint_acc, jnp.array([1.0])])
@@ -339,11 +370,19 @@ def _run_estimation_jax(dt, data, Q, R, include_ang_vel, include_contact_force, 
               "vel_update": x[3:6],
               "leg_odom_vel": new_leg_odom_vel
               }
+        
+        if cadelan_path is not None:
+            tau_diff = xs["tau"] - xs["tau_nom"]
+            feature = build_feature(feature_dim, joint_pos, joint_vel, tau_diff, orient_quat, x[3:6], ang_vel)
+            new_carry["history"] = update_history(carry["history"], feature, carry["hist_step"], history_stride)
+            new_carry["hist_step"] = carry["hist_step"] + 1
+            ys["tau_diff_pred"] = tau_diff_pred
+            new_carry["base_acc"] = base_acc
 
         # --- Log Results ---
         if include_ang_vel: ys["ang_vel_update"] = x[6:9]
         if include_contact_force: ys["contact_force_update"] = x[9:21]
-        if estimate_flags["estimate_base_acc"] and (base_acc_source == "external"): ys["base_acc_est"] = base_acc
+        if estimate_flags["estimate_base_acc"] and ((base_acc_source == "external") or (cadelan_path is not None)): ys["base_acc_est"] = base_acc
         if estimate_flags["estimate_contact_force"]: ys["contact_force_est"] = contact_force
         if estimate_flags["estimate_contact_state"]: ys["contact_state_est"] = contact_state
 
