@@ -38,62 +38,63 @@ Implementation of a Kalman Filter for estimating the state of a quadruped, using
 ### Kalman Filter
 
 The state of the robot is defined as the position $\mathbf{p}$ and velocity $\mathbf{v}$ at time step $k$:
-$
-\begin{equation}
-    \mathbf{x}_k = \begin{bmatrix}\mathbf{p}_k \\\mathbf{v}_k \end{bmatrix}, 
-    \qquad
-    \mathbf{p}_k \in \mathbb{R}^3,\; \mathbf{v}_k \in \mathbb{R}^3
-\end{equation}
-$
+
+$$
+\mathbf{x}_k = \begin{bmatrix}\mathbf{p}_k \cr \mathbf{v}_k \end{bmatrix}, 
+\qquad
+\mathbf{p}_k \in \mathbb{R}^3, \mathbf{v}_k \in \mathbb{R}^3
+$$
+
 calculated with Euler discretization with sampling time $\Delta t$ as $\mathbf{T}_s = \Delta t \mathbf{I}_3$ where $\mathbf{I}$ stands for the identity matrix:
-$
-\begin{align}
-    \mathbf{p}_{k} &= \mathbf{p}_{k-1} + \mathbf{T}_s \mathbf{v}_{k-1}, \\
+
+$$
+\begin{aligned}
+    \mathbf{p}_{k} &= \mathbf{p}_{k-1} + \mathbf{T}_s \mathbf{v}_{k-1}, \cr
     \mathbf{v}_{k} &= \mathbf{v}_{k-1} + \mathbf{T}_s \mathbf{a}_{k-1} .
-\end{align}
-$
+\end{aligned}
+$$
+
 with base acceleration $\mathbf{a}$. This is used as the control input vector $\mathbf{u}$ of the Kalman Filter. The prediction step is therefore defined as:
-$
-\begin{equation}
+
+$$
     \begin{bmatrix}
-        \mathbf{p}_k\\
+        \mathbf{p}_k \cr
         \mathbf{v}_k
     \end{bmatrix} = 
     \begin{bmatrix}
-        \mathbf{I}_3 & \mathbf{T}_s \\ \mathbf{0} & \mathbf{I}_3
+        \mathbf{I}_3 & \mathbf{T}_s \cr \mathbf{0} & \mathbf{I}_3
     \end{bmatrix}
     \begin{bmatrix}
-    \mathbf{p}_{k-1} \\ \mathbf{v}_{k-1}    
+        \mathbf{p}_{k-1} \cr \mathbf{v}_{k-1}
     \end{bmatrix} + 
     \begin{bmatrix}
-        \mathbf{0} \\ \mathbf{T}_s
+        \mathbf{0} \cr \mathbf{T}_s
     \end{bmatrix} [\mathbf{a}_{k-1}]
-\end{equation}
-$
+$$
 
 **Leg odometry** is used as a measurement for velocity, where the base velocity in world frame is expressed by
-$
-\begin{equation}
+
+$$
     \mathbf{v}_b^w = -\boldsymbol{\omega}_b^w \times \mathbf{f}_p(\mathbf{q}) - \mathbf{J}(\mathbf{q})\dot{\mathbf{q}}
-\end{equation}
-$
+$$
+
 with angular velocity of the base in world frame $\boldsymbol{\omega}_b^w$, foot position in base frame $\mathbf{f}_p$, linear Jacobian of the leg $\mathbf{J}$ and joint velocity $\dot{\mathbf{q}}$ (ref. SLAM Handbook Ch. 12). 
 
 The measurement $\mathbf{z}_k$ is made up of $\mathbf{v}_b^w$.
 
 ### Dynamics Model
 The **dynamics model** is estimated by applying Newton's second law of motion $F = ma + mg$:
-$
-\begin{equation}
+
+$$
     \mathbf{a}_{k-1} = \frac{\sum_{i=1}^{N} \mathbf{c}_i \cdot (\mathbf{F}_i - m\mathbf{g})}{m}.
-\end{equation}
-$
+$$
+
 where $\mathbf{F}$ is calculated as
-$
-\begin{equation}
+
+$$
     \mathbf{F}_i = (\mathbf{J}_i^{\top})^{-1} \boldsymbol{\tau}_i.
-\end{equation}
-$
+$$
+
 coming from the relationship between joint torque $\boldsymbol{\tau}$ and contact force $\mathbf{F}$ for each foot, with the assumption of $\mathbf{J}$ being invertible.
 
 ### Experiments
@@ -107,86 +108,88 @@ This approach is tested with the following methods:
 ## IP 2
 ### State Extension
 Angular velocity $\boldsymbol{\omega}$ and the flattened contact forces $\mathbf{F}$ are added to the state:
-$
-\begin{equation}
-    \mathbf{x}_k = \begin{bmatrix}\mathbf{p}_k \\ \mathbf{v}_k \\ \boldsymbol{\omega}_k \\ \mathbf{F}_k \end{bmatrix},
+
+$$
+    \mathbf{x}_k = \begin{bmatrix}\mathbf{p}_k \cr \mathbf{v}_k \cr \boldsymbol{\omega}_k \cr \mathbf{F}_k \end{bmatrix},
     \quad
     \mathbf{p}_k, \mathbf{v}_k, \boldsymbol{\omega}_k \in \mathbb{R}^3, \mathbf{F}_k \in \mathbb{R}^{12}
-\end{equation}
-$
+$$
+
 where $\boldsymbol{\omega}$ is estimated in the same way as $\mathbf{p}$ and $\mathbf{v}$:
-$
-\begin{align}
-    \boldsymbol{\omega}_{k} &= \boldsymbol{\omega}_{k-1} + \mathbf{T}_s \boldsymbol{\alpha}_{k-1}, \\
-\end{align}
-$
+
+$$
+\begin{aligned}
+    \boldsymbol{\omega}_{k} &= \boldsymbol{\omega}_{k-1} + \mathbf{T}_s \boldsymbol{\alpha}_{k-1}, \cr
+\end{aligned}
+$$
+
 with angular base acceleration $\boldsymbol{\alpha}$.
 In addition to that, a **contact state estimation** based on the generalized momentum observer is included. The observer is defined as:
-$
-\begin{equation}
-    \begin{bmatrix} \dot{\hat{\mathbf{p}}} \\ \dot{\hat{\mathbf{f}}} \end{bmatrix}
+
+$$
+    \begin{bmatrix} \dot{\hat{\mathbf{p}}} \cr \dot{\hat{\mathbf{f}}} \end{bmatrix}
     =
-    \begin{bmatrix} \mathbf{0} & -\mathbf{J}^{T} \\ \mathbf{0} & \mathbf{0} \end{bmatrix}
-    \begin{bmatrix} \hat{\mathbf{p}} \\ \hat{\mathbf{f}} \end{bmatrix}
+    \begin{bmatrix} \mathbf{0} & -\mathbf{J}^{T} \cr \mathbf{0} & \mathbf{0} \end{bmatrix}
+    \begin{bmatrix} \hat{\mathbf{p}} \cr \hat{\mathbf{f}} \end{bmatrix}
     +
-    \begin{bmatrix} \bar{\boldsymbol{\tau}} \\ \mathbf{0} \end{bmatrix}
+    \begin{bmatrix} \bar{\boldsymbol{\tau}} \cr \mathbf{0} \end{bmatrix}
     +
-    \begin{bmatrix} \mathbf{L}k_1(\mathbf{p} - \hat{\mathbf{p}}) \\ \mathbf{L}^2k_2(\mathbf{p} - \hat{\mathbf{p}}) \end{bmatrix}
-\end{equation}
-$
+    \begin{bmatrix} \mathbf{L}k_1(\mathbf{p} - \hat{\mathbf{p}}) \cr \mathbf{L}^2k_2(\mathbf{p} - \hat{\mathbf{p}}) \end{bmatrix}
+$$
+
 with the measured generalized momentum $\mathbf{p} = \mathbf{M}(\mathbf{x})\mathbf{v}$, the joint-space mass matrix $\mathbf{M}$, and the estimated generalized momentum $\hat{\mathbf{p}}$ and estimated contact forces at the four feet $\hat{\mathbf{f}}$. 
 The compensated torque is given by $\bar{\boldsymbol{\tau}} = \boldsymbol{\tau}_m + \mathbf{C}^{T}\mathbf{v} - \mathbf{g}$, with motor torques $\boldsymbol{\tau}_m$, Coriolis matrix $\mathbf{C}$, and gravity vector $\mathbf{g}$. The matrix $\mathbf{L}$ is the observer gain, and the correction terms $k_1$ and $k_2$ are defined element-wise as
-$
-\begin{align}
-    k_1(s) := q(s) \quad k_2(s) := \operatorname{sign}(s) + q(s)
-\end{align}
-$
-with $q(s) := \operatorname{sign}(s)\, |s|^{1/2} + s$ and $\operatorname{sign}(s) = 1$ for $s > 0$ and $\operatorname{sign}(s) = -1$ for $s < 0$.
+
+$$
+\begin{aligned}
+    k_1(s) := q(s) \quad k_2(s) := \text{sign}(s) + q(s)
+\end{aligned}
+$$
+
+with $q(s) := \text{sign}(s)\, |s|^{1/2} + s$ and $\text{sign}(s) = 1$ for $s > 0$ and $\text{sign}(s) = -1$ for $s < 0$.
 
 ### Dynamics Model Extension
 The **dynamics model** is now the Rigid-Body-Dynamics equation:
-$
-\begin{equation}
+
+$$
     \mathbf{M(q)\ddot{q}} + \mathbf{c(q,\dot{q})} + \mathbf{g(q)} = \mathbf{S}^T\boldsymbol{\tau} + \mathbf{J}^T \mathbf{F},
-\end{equation}
-$
+$$
+
 with the generalized coordinates $\mathbf{q} = [\mathbf{q}_b^T, \mathbf{q}_j^T]^T \in \mathbb{R}^{6+n}$ consisting of the base pose $\mathbf{q}_b$ (6 DoF) and the joint positions $\mathbf{q}_j$ ($n$ DoF), the joint-space inertia matrix $\mathbf{M(q)}$, the Coriolis and gravitational terms $\mathbf{c(q,\dot{q})}$ and $\mathbf{g(q)}$ and a selection matrix $\mathbf{S}$ that maps the joint torques onto the actuated coordinates.
 
 The inertia matrix can be partitioned according to the base and joint coordinates as
-$
-\begin{equation}
+
+$$
     \mathbf{M(q)} = 
-    \begin{bmatrix} \mathbf{H}_B & \mathbf{H}_{BL} \\ \mathbf{H}_{LB} & \mathbf{H}_L \end{bmatrix},
-\end{equation}
-$
+    \begin{bmatrix} \mathbf{H}_B & \mathbf{H}_{BL} \cr \mathbf{H}_{LB} & \mathbf{H}_L \end{bmatrix},
+$$
+
 where $\mathbf{H}_B \in \mathbb{R}^{6 \times 6}$ is the base inertia, $\mathbf{H}_L \in \mathbb{R}^{n \times n}$ the joint inertia, and $\mathbf{H}_{BL} = \mathbf{H}_{LB}^T \in \mathbb{R}^{6 \times n}$ the coupling block between the two. Since only the base acceleration is required for the Kalman filter, it is sufficient to consider the first six rows, which describe the dynamics of the unactuated base. The equation for the base acceleration can be reduced to:
-$
-\begin{equation}
+
+$$
     \mathbf{\ddot{q}}_B = \mathbf{H}_B^{-1} \left( \mathbf{J}_B^T \mathbf{F} - \mathbf{H}_{BL} \mathbf{\ddot{q}}_L - \mathbf{c}_B - \mathbf{g}_B \right),
-\end{equation}
-$
+$$
 
 Two approaches are implemented: computing the base acceleration in a separate function or include it into the prediction model of the Kalman Filter. For the latter, the prediction step changes to:
-$
-\begin{equation}
+
+$$
     \mathbf{A}\cdot \mathbf{x} + \mathbf{B}\cdot \mathbf{u} = 
     \begin{bmatrix}
-        \mathbf{I}_3 & \mathbf{T}_s & 0 & 0 \\
-        0 & \mathbf{I}_3 & 0 & (H_B^{-1} \cdot J^TF)[:3] \\
-        0 & 0 & \mathbf{I}_3 & (H_B^{-1} \cdot J^TF)[3:] \\
+        \mathbf{I}_3 & \mathbf{T}_s & 0 & 0 \cr
+        0 & \mathbf{I}_3 & 0 & (H_B^{-1} \cdot J^TF)[:3] \cr
+        0 & 0 & \mathbf{I}_3 & (H_B^{-1} \cdot J^TF)[3:] \cr
         0 & 0 & 0 & \mathbf{I}_{12}
     \end{bmatrix}
     \cdot
     \begin{bmatrix}
-        \mathbf{p}_k \\ \mathbf{v}_k \\ \boldsymbol{\omega}_k \\ \mathbf{F}_k
+        \mathbf{p}_k \cr \mathbf{v}_k \cr \boldsymbol{\omega}_k \cr \mathbf{F}_k
     \end{bmatrix}
     +
     \begin{bmatrix}
-        0 & 0 \\ H_B^{-1} \cdot (-H_{BL}) & H_B^{-1} \cdot (-\mathbf{c-g}) \\ 0 & 0
+        0 & 0 \cr H_B^{-1} \cdot (-H_{BL}) & H_B^{-1} \cdot (-\mathbf{c-g}) \cr 0 & 0
     \end{bmatrix}
     \cdot
     \begin{bmatrix}
-        \mathbf{\ddot{q}}_L \\ 1
+        \mathbf{\ddot{q}}_L \cr 1
     \end{bmatrix}
-\end{equation}
-$
+$$
